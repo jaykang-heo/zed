@@ -32,12 +32,30 @@ const COMMAND_OUTPUT_LIMIT: u64 = 16 * 1024;
 /// Remember that each invocation of this tool will spawn a new shell process, so you can't rely on any state from previous invocations.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct TerminalToolInput {
-    /// The one-liner command to execute.
-    pub command: String,
-    /// Working directory for the command. This must be one of the root directories of the project.
-    pub cd: String,
     /// Optional maximum runtime (in milliseconds). If exceeded, the running terminal task is killed.
     pub timeout_ms: Option<u64>,
+}
+
+pub enum TerminalAction {
+    /// Executes a command in a terminal.
+    /// For example, "git status" would run `git status`.
+    RunCmd {
+        /// The one-liner command to execute.
+        command: String,
+        /// Working directory for the command. This must be one of the root directories of the project.
+        cd: String,
+    },
+    /// Sends input to an already-running process.
+    /// This can *ONLY* be used when there is already a
+    /// terminal running. If this is specified and there
+    /// is no terminal running, the tool call
+    /// will error.
+    SendInput {
+        /// The input string to send to the process.
+        /// Note: a newline will be sent at the end of this
+        /// automatically, even if it doesn't end in a newline.
+        input: String,
+    },
 }
 
 pub struct TerminalTool {
