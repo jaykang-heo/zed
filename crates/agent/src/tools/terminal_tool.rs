@@ -32,6 +32,10 @@ const COMMAND_OUTPUT_LIMIT: u64 = 16 * 1024;
 /// Remember that each invocation of this tool will spawn a new shell process, so you can't rely on any state from previous invocations.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct TerminalToolInput {
+    /// The one-liner command to execute.
+    pub command: String,
+    /// Working directory for the command. This must be one of the root directories of the project.
+    pub cd: String,
     /// Optional maximum runtime (in milliseconds). If exceeded, the running terminal task is killed.
     pub timeout_ms: Option<u64>,
 }
