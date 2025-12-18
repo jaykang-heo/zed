@@ -55,6 +55,9 @@ pub enum TerminalAction {
     /// is no terminal running, the tool call
     /// will error.
     SendInput {
+        /// The ID of the terminal to send input to.
+        /// This must be a terminal that was previously created by a RunCmd action.
+        terminal_id: String,
         /// The input string to send to the process.
         /// Note: a newline will be sent at the end of this
         /// automatically, even if it doesn't end in a newline.
@@ -96,7 +99,7 @@ impl AgentTool for TerminalTool {
         if let Ok(input) = input {
             let text = match &input.action {
                 TerminalAction::RunCmd { command, .. } => command.as_str(),
-                TerminalAction::SendInput { input } => input.as_str(),
+                TerminalAction::SendInput { input, .. } => input.as_str(),
             };
             let mut lines = text.lines();
             let first_line = lines.next().unwrap_or_default();
@@ -124,59 +127,177 @@ impl AgentTool for TerminalTool {
         event_stream: ToolCallEventStream,
         cx: &mut App,
     ) -> Task<Result<Self::Output>> {
-        let (command, working_dir) = match &input.action {
+        let timeout = input.timeout_ms.map(Duration::from_millis);
+
+        match &input.action {
             TerminalAction::RunCmd { command, cd } => {
                 let working_dir = match working_dir_from_cd(cd, &self.project, cx) {
                     Ok(dir) => dir,
                     Err(err) => return Task::ready(Err(err)),
                 };
-                (command.clone(), working_dir)
-            }
-            TerminalAction::SendInput { .. } => {
-                return Task::ready(Err(anyhow::anyhow!(
-                    "SendInput action is not yet supported"
-                )));
-            }
-        };
+                let command = command.clone();
 
-        let authorize = event_stream.authorize(self.initial_title(Ok(input.clone()), cx), cx);
-        cx.spawn(async move |cx| {
-            authorize.await?;
+                let authorize =
+                    event_stream.authorize(self.initial_title(Ok(input.clone()), cx), cx);
+                cx.spawn(async move |cx| {
+                    authorize.await?;
 
-            let terminal = self
-                .environment
-                .create_terminal(command.clone(), working_dir, Some(COMMAND_OUTPUT_LIMIT), cx)
-                .await?;
+                    let terminal = self
+                        .environment
+                        .create_terminal(
+                            command.clone(),
+                            working_dir,
+                            Some(COMMAND_OUTPUT_LIMIT),
+                            cx,
+                        )
+                        .await?;
 
-            let terminal_id = terminal.id(cx)?;
-            event_stream.update_fields(acp::ToolCallUpdateFields::new().content(vec![
-                acp::ToolCallContent::Terminal(acp::Terminal::new(terminal_id)),
-            ]));
+                    let terminal_id = terminal.id(cx)?;
+                    event_stream.update_fields(acp::ToolCallUpdateFields::new().content(vec![
+                        acp::ToolCallContent::Terminal(acp::Terminal::new(terminal_id)),
+                    ]));
 
-            let timeout = input.timeout_ms.map(Duration::from_millis);
+                    let exit_status = match timeout {
+                        Some(timeout) => {
+                            let wait_for_exit = terminal.wait_for_exit(cx)?;
+                            let timeout_task = cx.background_spawn(async move {
+                                smol::Timer::after(timeout).await;
+                            });
 
-            let exit_status = match timeout {
-                Some(timeout) => {
-                    let wait_for_exit = terminal.wait_for_exit(cx)?;
-                    let timeout_task = cx.background_spawn(async move {
-                        smol::Timer::after(timeout).await;
-                    });
-
-                    futures::select! {
-                        status = wait_for_exit.clone().fuse() => status,
-                        _ = timeout_task.fuse() => {
-                            terminal.kill(cx)?;
-                            wait_for_exit.await
+                            futures::select! {
+                                status = wait_for_exit.clone().fuse() => status,
+                                _ = timeout_task.fuse() => {
+                                    terminal.kill(cx)?;
+                                    wait_for_exit.await
+                                }
+                            }
                         }
-                    }
+                        None => terminal.wait_for_exit(cx)?.await,
+                    };
+
+                    let output = terminal.current_output(cx)?;
+
+                    Ok(process_content(output, &command, exit_status))
+                })
+            }
+            TerminalAction::SendInput { terminal_id, input } => {
+                let terminal_id = acp::TerminalId::new(terminal_id.clone());
+                let input = input.clone();
+
+                let title: SharedString =
+                    MarkdownInlineCode(&format!("Send input {:?} to current process", input))
+                        .to_string()
+                        .into();
+                let authorize = event_stream.authorize(title, cx);
+
+                cx.spawn(async move |cx| {
+                    authorize.await?;
+
+                    let terminal = self.environment.get_terminal(&terminal_id, cx)?;
+
+                    terminal.send_input(&input, cx)?;
+
+                    let timeout = timeout.unwrap_or(Duration::from_millis(1000));
+                    let (exited, exit_status) = {
+                        let wait_for_exit = terminal.wait_for_exit(cx)?;
+                        let timeout_task = cx.background_spawn(async move {
+                            smol::Timer::after(timeout).await;
+                        });
+
+                        futures::select! {
+                            status = wait_for_exit.clone().fuse() => (true, status),
+                            _ = timeout_task.fuse() => {
+                                (false, acp::TerminalExitStatus::new())
+                            }
+                        }
+                    };
+
+                    let output = terminal.current_output(cx)?;
+                    Ok(process_send_input_result(
+                        output,
+                        &input,
+                        exited,
+                        exit_status,
+                        timeout,
+                    ))
+                })
+            }
+        }
+    }
+}
+
+fn process_send_input_result(
+    output: acp::TerminalOutputResponse,
+    input: &str,
+    exited: bool,
+    exit_status: acp::TerminalExitStatus,
+    timeout: Duration,
+) -> String {
+    let content = output.output.trim();
+    let content_block = if content.is_empty() {
+        String::new()
+    } else if output.truncated {
+        format!(
+            "Output truncated. The first {} bytes:\n\n```\n{}\n```",
+            content.len(),
+            content
+        )
+    } else {
+        format!("```\n{}\n```", content)
+    };
+
+    if exited {
+        match exit_status.exit_code {
+            Some(0) => {
+                if content_block.is_empty() {
+                    format!(
+                        "Input \"{}\" was sent. The process exited successfully.",
+                        input
+                    )
+                } else {
+                    format!(
+                        "Input \"{}\" was sent. The process exited successfully.\n\n{}",
+                        input, content_block
+                    )
                 }
-                None => terminal.wait_for_exit(cx)?.await,
-            };
-
-            let output = terminal.current_output(cx)?;
-
-            Ok(process_content(output, &command, exit_status))
-        })
+            }
+            Some(code) => {
+                if content_block.is_empty() {
+                    format!(
+                        "Input \"{}\" was sent. The process exited with code {}.",
+                        input, code
+                    )
+                } else {
+                    format!(
+                        "Input \"{}\" was sent. The process exited with code {}.\n\n{}",
+                        input, code, content_block
+                    )
+                }
+            }
+            None => {
+                if content_block.is_empty() {
+                    format!("Input \"{}\" was sent. The process was interrupted.", input)
+                } else {
+                    format!(
+                        "Input \"{}\" was sent. The process was interrupted.\n\n{}",
+                        input, content_block
+                    )
+                }
+            }
+        }
+    } else {
+        let timeout_ms = timeout.as_millis();
+        if content_block.is_empty() {
+            format!(
+                "Input \"{}\" was sent. The process has not exited after {} ms.",
+                input, timeout_ms
+            )
+        } else {
+            format!(
+                "Input \"{}\" was sent. The process has not exited after {} ms. Current terminal state:\n\n{}",
+                input, timeout_ms, content_block
+            )
+        }
     }
 }
 

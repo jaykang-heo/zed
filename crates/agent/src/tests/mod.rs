@@ -60,6 +60,102 @@ fn init_test(cx: &mut TestAppContext) {
     });
 }
 
+struct FakeTerminalHandleWithInput {
+    killed: Arc<AtomicBool>,
+    input_received: Arc<std::sync::Mutex<Vec<String>>>,
+    wait_for_exit: Shared<Task<acp::TerminalExitStatus>>,
+    output: acp::TerminalOutputResponse,
+    id: acp::TerminalId,
+}
+
+impl FakeTerminalHandleWithInput {
+    fn new_exits_on_q(cx: &mut App) -> Self {
+        let killed = Arc::new(AtomicBool::new(false));
+        let input_received = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+        let killed_for_task = killed.clone();
+        let input_for_task = input_received.clone();
+        let wait_for_exit = cx
+            .spawn(async move |cx| {
+                loop {
+                    if killed_for_task.load(Ordering::SeqCst) {
+                        return acp::TerminalExitStatus::new();
+                    }
+                    {
+                        let inputs = input_for_task.lock().unwrap();
+                        if inputs.iter().any(|s| s.contains("q")) {
+                            return acp::TerminalExitStatus::new().exit_code(Some(0));
+                        }
+                    }
+                    cx.background_executor()
+                        .timer(Duration::from_millis(1))
+                        .await;
+                }
+            })
+            .shared();
+
+        Self {
+            killed,
+            input_received,
+            wait_for_exit,
+            output: acp::TerminalOutputResponse::new("README.md contents".to_string(), false),
+            id: acp::TerminalId::new("fake_terminal_with_input".to_string()),
+        }
+    }
+
+    fn inputs(&self) -> Vec<String> {
+        self.input_received.lock().unwrap().clone()
+    }
+}
+
+impl crate::TerminalHandle for FakeTerminalHandleWithInput {
+    fn id(&self, _cx: &AsyncApp) -> Result<acp::TerminalId> {
+        Ok(self.id.clone())
+    }
+
+    fn current_output(&self, _cx: &AsyncApp) -> Result<acp::TerminalOutputResponse> {
+        Ok(self.output.clone())
+    }
+
+    fn wait_for_exit(&self, _cx: &AsyncApp) -> Result<Shared<Task<acp::TerminalExitStatus>>> {
+        Ok(self.wait_for_exit.clone())
+    }
+
+    fn kill(&self, _cx: &AsyncApp) -> Result<()> {
+        self.killed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn send_input(&self, input: &str, _cx: &AsyncApp) -> Result<()> {
+        self.input_received.lock().unwrap().push(input.to_string());
+        Ok(())
+    }
+}
+
+struct FakeThreadEnvironmentWithInput {
+    handle: Rc<FakeTerminalHandleWithInput>,
+}
+
+impl crate::ThreadEnvironment for FakeThreadEnvironmentWithInput {
+    fn create_terminal(
+        &self,
+        _command: String,
+        _cwd: Option<std::path::PathBuf>,
+        _output_byte_limit: Option<u64>,
+        _cx: &mut AsyncApp,
+    ) -> Task<Result<Rc<dyn crate::TerminalHandle>>> {
+        Task::ready(Ok(self.handle.clone() as Rc<dyn crate::TerminalHandle>))
+    }
+
+    fn get_terminal(
+        &self,
+        _terminal_id: &acp::TerminalId,
+        _cx: &AsyncApp,
+    ) -> Result<Rc<dyn crate::TerminalHandle>> {
+        Ok(self.handle.clone() as Rc<dyn crate::TerminalHandle>)
+    }
+}
+
 struct FakeTerminalHandle {
     killed: Arc<AtomicBool>,
     wait_for_exit: Shared<Task<acp::TerminalExitStatus>>,
@@ -115,6 +211,10 @@ impl crate::TerminalHandle for FakeTerminalHandle {
         self.killed.store(true, Ordering::SeqCst);
         Ok(())
     }
+
+    fn send_input(&self, _input: &str, _cx: &AsyncApp) -> Result<()> {
+        Ok(())
+    }
 }
 
 struct FakeThreadEnvironment {
@@ -130,6 +230,14 @@ impl crate::ThreadEnvironment for FakeThreadEnvironment {
         _cx: &mut AsyncApp,
     ) -> Task<Result<Rc<dyn crate::TerminalHandle>>> {
         Task::ready(Ok(self.handle.clone() as Rc<dyn crate::TerminalHandle>))
+    }
+
+    fn get_terminal(
+        &self,
+        _terminal_id: &acp::TerminalId,
+        _cx: &AsyncApp,
+    ) -> Result<Rc<dyn crate::TerminalHandle>> {
+        Ok(self.handle.clone() as Rc<dyn crate::TerminalHandle>)
     }
 }
 
@@ -287,6 +395,72 @@ async fn test_terminal_tool_without_timeout_does_not_kill_handle(cx: &mut TestAp
         !handle.was_killed(),
         "did not expect terminal handle to be killed without a timeout"
     );
+}
+
+/// Test that SendInput action sends input to the terminal and the terminal responds.
+#[gpui::test]
+async fn test_terminal_tool_send_input(cx: &mut TestAppContext) {
+    init_test(cx);
+    always_allow_tools(cx);
+
+    let fs = FakeFs::new(cx.executor());
+    let project = Project::test(fs, [], cx).await;
+
+    let handle = Rc::new(cx.update(|cx| FakeTerminalHandleWithInput::new_exits_on_q(cx)));
+    let environment = Rc::new(FakeThreadEnvironmentWithInput {
+        handle: handle.clone(),
+    });
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    let tool = Arc::new(crate::TerminalTool::new(project, environment));
+
+    let (event_stream, _rx) = crate::ToolCallEventStream::test();
+    let task = cx.update(|cx| {
+        tool.run(
+            crate::TerminalToolInput {
+                action: crate::TerminalAction::SendInput {
+                    terminal_id: "fake_terminal_with_input".to_string(),
+                    input: "q".to_string(),
+                },
+                timeout_ms: Some(500),
+            },
+            event_stream,
+            cx,
+        )
+    });
+
+    let mut task_future: Pin<Box<Fuse<Task<Result<String>>>>> = Box::pin(task.fuse());
+
+    let deadline = std::time::Instant::now() + Duration::from_millis(1000);
+    loop {
+        if let Some(result) = task_future.as_mut().now_or_never() {
+            let result = result.expect("terminal tool task should complete");
+
+            let inputs = handle.inputs();
+            assert!(
+                inputs.iter().any(|s| s.contains("q")),
+                "expected 'q' to be sent to terminal, got: {:?}",
+                inputs
+            );
+
+            assert!(
+                result.contains("Input \"q\" was sent"),
+                "expected result to indicate input was sent, got: {result}"
+            );
+            assert!(
+                result.contains("exited successfully") || result.contains("README.md contents"),
+                "expected result to show success or terminal content, got: {result}"
+            );
+            return;
+        }
+
+        if std::time::Instant::now() >= deadline {
+            panic!("timed out waiting for terminal tool task to complete");
+        }
+
+        cx.run_until_parked();
+        cx.background_executor.timer(Duration::from_millis(1)).await;
+    }
 }
 
 /// Test that simulates a conversation where the model calls the terminal tool

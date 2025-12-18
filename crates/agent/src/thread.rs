@@ -538,6 +538,7 @@ pub trait TerminalHandle {
     fn current_output(&self, cx: &AsyncApp) -> Result<acp::TerminalOutputResponse>;
     fn wait_for_exit(&self, cx: &AsyncApp) -> Result<Shared<Task<acp::TerminalExitStatus>>>;
     fn kill(&self, cx: &AsyncApp) -> Result<()>;
+    fn send_input(&self, input: &str, cx: &AsyncApp) -> Result<()>;
 }
 
 pub trait ThreadEnvironment {
@@ -548,6 +549,12 @@ pub trait ThreadEnvironment {
         output_byte_limit: Option<u64>,
         cx: &mut AsyncApp,
     ) -> Task<Result<Rc<dyn TerminalHandle>>>;
+
+    fn get_terminal(
+        &self,
+        terminal_id: &acp::TerminalId,
+        cx: &AsyncApp,
+    ) -> Result<Rc<dyn TerminalHandle>>;
 }
 
 #[derive(Debug)]

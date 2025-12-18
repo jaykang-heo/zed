@@ -1442,6 +1442,18 @@ impl AcpThreadEnvironment {
 }
 
 impl ThreadEnvironment for AcpThreadEnvironment {
+    fn get_terminal(
+        &self,
+        terminal_id: &acp::TerminalId,
+        cx: &AsyncApp,
+    ) -> Result<Rc<dyn TerminalHandle>> {
+        let terminal = self
+            .acp_thread
+            .read_with(cx, |thread, _cx| thread.terminal(terminal_id.clone()))??;
+
+        Ok(Rc::new(AcpTerminalHandle::new(terminal, None)) as _)
+    }
+
     fn create_terminal(
         &self,
         command: String,
@@ -1514,6 +1526,19 @@ impl TerminalHandle for AcpTerminalHandle {
         cx.update(|cx| {
             self.terminal.update(cx, |terminal, cx| {
                 terminal.kill(cx);
+            });
+        })?;
+        Ok(())
+    }
+
+    fn send_input(&self, input: &str, cx: &AsyncApp) -> Result<()> {
+        cx.update(|cx| {
+            self.terminal.update(cx, |terminal, cx| {
+                terminal.inner().update(cx, |inner_terminal, _cx| {
+                    let mut bytes = input.as_bytes().to_vec();
+                    bytes.push(b'\n');
+                    inner_terminal.input(bytes);
+                });
             });
         })?;
         Ok(())
