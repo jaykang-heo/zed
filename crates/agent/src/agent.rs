@@ -1456,7 +1456,7 @@ impl ThreadEnvironment for AcpThreadEnvironment {
             .read_with(cx, |thread, _cx| thread.terminal(terminal_id.clone()));
 
         match &result {
-            Ok(Ok(terminal)) => {
+            Ok(Ok(_terminal)) => {
                 eprintln!(
                     "[INTERACTIVE-TERMINAL-DEBUG] get_terminal: found terminal {:?}",
                     terminal_id
@@ -1491,7 +1491,7 @@ impl ThreadEnvironment for AcpThreadEnvironment {
             thread.create_terminal(command, vec![], vec![], cwd, output_byte_limit, cx)
         });
 
-        cx.spawn(async move |cx| {
+        cx.spawn(async move |_cx| {
             let terminal = task?.await?;
 
             // Don't use drop_tx/drop_rx - we want the terminal to stay in the map
