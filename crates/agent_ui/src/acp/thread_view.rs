@@ -2373,18 +2373,26 @@ pub(crate) mod tests {
         AgentSessionList, AgentSessionListRequest, AgentSessionListResponse, StubAgentConnection,
     };
     use action_log::ActionLog;
-    use agent::{AgentTool, EditFileTool, FetchTool, TerminalTool, ToolPermissionContext};
+    use agent::{
+        AgentTool, EditFileTool, FetchTool, NativeAgent, NativeAgentConnection, TerminalTool,
+        ToolPermissionContext,
+    };
     use agent_client_protocol::SessionId;
     use editor::MultiBufferOffset;
     use fs::FakeFs;
     use gpui::{EventEmitter, TestAppContext, VisualTestContext};
-    use project::Project;
+    use language_model::{
+        LanguageModelCompletionEvent, LanguageModelRegistry, LanguageModelToolUse, StopReason,
+    };
+    use project::{AgentLocation, Project};
     use serde_json::json;
     use settings::SettingsStore;
     use std::any::Any;
     use std::path::Path;
     use std::rc::Rc;
-    use workspace::Item;
+    use text::Point;
+    use util::rel_path::rel_path;
+    use workspace::{CollaboratorId, Item};
 
     use super::*;
 
@@ -4979,5 +4987,200 @@ pub(crate) mod tests {
                 .any(|id| id.starts_with("always_deny_pattern:terminal\n")),
             "Missing deny pattern option"
         );
+    }
+
+    #[gpui::test]
+    async fn test_point_tool_end_to_end(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        // Register a FakeLanguageModel so NativeAgent picks it up as the
+        // default model when creating threads.
+        let _fake_provider = cx.update(|cx| LanguageModelRegistry::test(cx));
+        let fake_model = cx.update(|cx| LanguageModelRegistry::read_global(cx).fake_model());
+
+        cx.update(|cx| {
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.always_allow_tool_actions = true;
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+
+        // 1. Set up FakeFs with a known file and register it globally (needed
+        //    by ProfileSelector when using NativeAgentConnection).
+        let fs = FakeFs::new(cx.executor());
+        cx.update(|cx| <dyn fs::Fs>::set_global(fs.clone(), cx));
+        fs.insert_tree(
+            "/project",
+            json!({
+                "src": {
+                    "main.rs": "fn first() {\n    println!(\"hello world\");\n}\n\nfn second() {\n    println!(\"goodbye world\");\n}\n"
+                }
+            }),
+        )
+        .await;
+
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+
+        // 2. Create workspace and thread view using NativeAgentConnection
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+
+        let thread_store = cx.update(|_window, cx| cx.new(|cx| ThreadStore::new(cx)));
+        let history = cx.update(|window, cx| cx.new(|cx| AcpThreadHistory::new(None, window, cx)));
+
+        let native_connection = NativeAgentConnection(
+            NativeAgent::new(
+                project.clone(),
+                thread_store.clone(),
+                agent::Templates::new(),
+                None,
+                fs.clone(),
+                &mut cx.to_async(),
+            )
+            .await
+            .unwrap(),
+        );
+
+        let thread_view = cx.update(|window, cx| {
+            cx.new(|cx| {
+                AcpServerView::new(
+                    Rc::new(StubAgentServer::new(native_connection.clone())),
+                    None,
+                    None,
+                    workspace.downgrade(),
+                    project.clone(),
+                    Some(thread_store),
+                    None,
+                    history,
+                    window,
+                    cx,
+                )
+            })
+        });
+        add_to_workspace(thread_view.clone(), cx);
+        cx.run_until_parked();
+
+        // 3. Enable following and send a user message.
+        let active = active_thread(&thread_view, cx);
+        let message_editor_entity = message_editor(&thread_view, cx);
+
+        active.update_in(cx, |view, _window, _cx| {
+            view.should_be_following = true;
+        });
+
+        message_editor_entity.update_in(cx, |editor, window, cx| {
+            editor.set_text("Show me the hello world code", window, cx);
+        });
+        active.update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+
+        // 4. Assert the workspace is now following the agent
+        workspace.update_in(cx, |workspace, _window, _cx| {
+            assert!(
+                workspace.is_being_followed(CollaboratorId::Agent),
+                "Workspace should be following the agent after send"
+            );
+        });
+
+        let thread = active.read_with(cx, |view, _| view.thread.clone());
+
+        // 5. The FakeLanguageModel received the prompt. Have it emit a point
+        //    tool use so the real PointTool runs.
+        let fake = fake_model.as_fake();
+        assert!(
+            !fake.pending_completions().is_empty(),
+            "Model should have a pending completion after send"
+        );
+
+        let point_tool_use = LanguageModelToolUse {
+            id: "point-call-1".into(),
+            name: "point".into(),
+            raw_input: json!({
+                "path": "project/src/main.rs",
+                "code": "println!(\"goodbye world\")"
+            })
+            .to_string(),
+            input: json!({
+                "path": "project/src/main.rs",
+                "code": "println!(\"goodbye world\")"
+            }),
+            is_input_complete: true,
+            thought_signature: None,
+        };
+        fake.send_last_completion_stream_event(LanguageModelCompletionEvent::ToolUse(
+            point_tool_use,
+        ));
+        fake.send_last_completion_stream_event(LanguageModelCompletionEvent::Stop(
+            StopReason::ToolUse,
+        ));
+        fake.end_last_completion_stream();
+        cx.run_until_parked();
+
+        // 6. Verify the PointTool ran: it should have set an agent location
+        //    and the workspace should have opened an editor with a selection
+        //    on the matched code.
+        let has_agent_location =
+            project.read_with(cx, |project, _| project.agent_location().is_some());
+        assert!(
+            has_agent_location,
+            "PointTool should have called project.set_agent_location"
+        );
+
+        let editor = workspace.update_in(cx, |workspace, _window, cx| {
+            let pane = workspace.active_pane().read(cx);
+            pane.active_item()
+                .and_then(|item| item.act_as::<Editor>(cx))
+                .expect("Expected an editor in the active pane")
+        });
+
+        editor.update_in(cx, |editor, _window, cx| {
+            let snapshot = editor.display_snapshot(cx);
+            let selection = editor.selections.newest::<Point>(&snapshot);
+            assert_ne!(
+                selection.start, selection.end,
+                "Selection should be a range, not a collapsed cursor"
+            );
+            assert_eq!(
+                selection.start.row, 5,
+                "Selection should start on the line containing the matched code"
+            );
+            assert_eq!(
+                selection.end.row, 5,
+                "Selection should end on the same line for a single-line match"
+            );
+        });
+
+        // 7. Assert: the tool call is in WaitingForContinuation state
+        thread.read_with(cx, |thread, _| {
+            let awaiting = thread
+                .first_tool_awaiting_continuation()
+                .expect("should have a tool awaiting continuation");
+            assert_eq!(awaiting.id, acp::ToolCallId::new("point-call-1"));
+        });
+
+        // 8. Continue the tool call by calling send() with an empty editor.
+        //    When the thread is Generating and there is a tool awaiting
+        //    continuation, send() calls do_continue_tool_call and returns.
+        active.update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+
+        // 9. Assert: tool call is no longer waiting for continuation
+        thread.read_with(cx, |thread, _| {
+            assert!(
+                thread.first_tool_awaiting_continuation().is_none(),
+                "No tool should be awaiting continuation after continue"
+            );
+        });
+
+        // 10. The PointTool returned and the thread sends the result back to
+        //     the model. Complete the turn.
+        assert!(
+            !fake.pending_completions().is_empty(),
+            "Model should have been called again with the tool result"
+        );
+        fake.send_last_completion_stream_event(LanguageModelCompletionEvent::Stop(
+            StopReason::EndTurn,
+        ));
+        fake.end_last_completion_stream();
+        cx.run_until_parked();
     }
 }
