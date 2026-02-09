@@ -600,7 +600,7 @@ impl LanguageServerState {
                                     .child(
                                         Icon::new(IconName::Circle)
                                             .color(status_color)
-                                            .size(IconSize::Small),
+                                            .size(IconSize::XSmall),
                                     )
                                     .child(
                                         Label::new(status_label)
@@ -1323,7 +1323,7 @@ impl Render for LspButton {
                 .trigger_with_tooltip(
                     IconButton::new("zed-lsp-tool-button", IconName::BoltOutlined)
                         .when_some(indicator, IconButton::indicator)
-                        .icon_size(IconSize::Small)
+                        .icon_size(IconSize::XSmall)
                         .indicator_border_color(Some(cx.theme().colors().status_bar_background)),
                     move |_window, cx| {
                         Tooltip::with_meta("Language Servers", Some(&ToggleMenu), description, cx)

@@ -359,7 +359,7 @@ impl ActivityIndicator {
             return Some(Content {
                 icon: Some(
                     Icon::new(IconName::Warning)
-                        .size(IconSize::Small)
+                        .size(IconSize::XSmall)
                         .into_any_element(),
                 ),
                 message: message.clone(),
@@ -400,7 +400,7 @@ impl ActivityIndicator {
                 return Some(Content {
                     icon: Some(
                         Icon::new(IconName::ArrowCircle)
-                            .size(IconSize::Small)
+                            .size(IconSize::XSmall)
                             .with_rotate_animation(2)
                             .into_any_element(),
                     ),
@@ -422,7 +422,7 @@ impl ActivityIndicator {
             return Some(Content {
                 icon: Some(
                     Icon::new(IconName::ArrowCircle)
-                        .size(IconSize::Small)
+                        .size(IconSize::XSmall)
                         .with_rotate_animation(2)
                         .into_any_element(),
                 ),
@@ -445,7 +445,7 @@ impl ActivityIndicator {
             return Some(Content {
                 icon: Some(
                     Icon::new(IconName::ArrowCircle)
-                        .size(IconSize::Small)
+                        .size(IconSize::XSmall)
                         .with_rotate_animation(2)
                         .into_any_element(),
                 ),
@@ -461,7 +461,7 @@ impl ActivityIndicator {
                 return Some(Content {
                     icon: Some(
                         Icon::new(IconName::ArrowCircle)
-                            .size(IconSize::Small)
+                            .size(IconSize::XSmall)
                             .with_rotate_animation(2)
                             .into_any_element(),
                     ),
@@ -519,7 +519,7 @@ impl ActivityIndicator {
             return Some(Content {
                 icon: Some(
                     Icon::new(IconName::Download)
-                        .size(IconSize::Small)
+                        .size(IconSize::XSmall)
                         .into_any_element(),
                 ),
                 message: format!(
@@ -548,7 +548,7 @@ impl ActivityIndicator {
             return Some(Content {
                 icon: Some(
                     Icon::new(IconName::Download)
-                        .size(IconSize::Small)
+                        .size(IconSize::XSmall)
                         .into_any_element(),
                 ),
                 message: format!(
@@ -577,7 +577,7 @@ impl ActivityIndicator {
             return Some(Content {
                 icon: Some(
                     Icon::new(IconName::Warning)
-                        .size(IconSize::Small)
+                        .size(IconSize::XSmall)
                         .into_any_element(),
                 ),
                 message: format!(
@@ -605,7 +605,7 @@ impl ActivityIndicator {
             return Some(Content {
                 icon: Some(
                     Icon::new(IconName::Warning)
-                        .size(IconSize::Small)
+                        .size(IconSize::XSmall)
                         .into_any_element(),
                 ),
                 message: format!("Formatting failed: {failure}. Click to see logs."),
@@ -651,7 +651,7 @@ impl ActivityIndicator {
             return Some(Content {
                 icon: Some(
                     Icon::new(IconName::Warning)
-                        .size(IconSize::Small)
+                        .size(IconSize::XSmall)
                         .into_any_element(),
                 ),
                 message: final_message,
@@ -676,7 +676,7 @@ impl ActivityIndicator {
                 AutoUpdateStatus::Checking => Some(Content {
                     icon: Some(
                         Icon::new(IconName::LoadCircle)
-                            .size(IconSize::Small)
+                            .size(IconSize::XSmall)
                             .with_rotate_animation(3)
                             .into_any_element(),
                     ),
@@ -689,7 +689,7 @@ impl ActivityIndicator {
                 AutoUpdateStatus::Downloading { version } => Some(Content {
                     icon: Some(
                         Icon::new(IconName::Download)
-                            .size(IconSize::Small)
+                            .size(IconSize::XSmall)
                             .into_any_element(),
                     ),
                     message: "Downloading Zed update…".to_string(),
@@ -701,7 +701,7 @@ impl ActivityIndicator {
                 AutoUpdateStatus::Installing { version } => Some(Content {
                     icon: Some(
                         Icon::new(IconName::LoadCircle)
-                            .size(IconSize::Small)
+                            .size(IconSize::XSmall)
                             .with_rotate_animation(3)
                             .into_any_element(),
                     ),
@@ -720,7 +720,7 @@ impl ActivityIndicator {
                 AutoUpdateStatus::Errored { error } => Some(Content {
                     icon: Some(
                         Icon::new(IconName::Warning)
-                            .size(IconSize::Small)
+                            .size(IconSize::XSmall)
                             .into_any_element(),
                     ),
                     message: "Failed to update Zed".to_string(),
@@ -757,7 +757,7 @@ impl ActivityIndicator {
                     };
 
                     Some(Content {
-                        icon: Some(Icon::new(icon).size(IconSize::Small).map(|this| {
+                        icon: Some(Icon::new(icon).size(IconSize::XSmall).map(|this| {
                             if rotate {
                                 this.with_rotate_animation(3).into_any_element()
                             } else {

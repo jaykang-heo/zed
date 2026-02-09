@@ -117,7 +117,7 @@ impl Render for EditPredictionButton {
                 if let Status::Error(e) = status {
                     return div().child(
                         IconButton::new("copilot-error", icon)
-                            .icon_size(IconSize::Small)
+                            .icon_size(IconSize::XSmall)
                             .on_click(cx.listener(move |_, _, window, cx| {
                                 if let Some(workspace) = window.root::<Workspace>().flatten() {
                                     workspace.update(cx, |workspace, cx| {
@@ -950,7 +950,7 @@ impl EditPredictionButton {
                                 .disabled(true)
                                 .icon(IconName::Close)
                                 .icon_color(Color::Error)
-                                .icon_size(IconSize::Small),
+                                .icon_size(IconSize::XSmall),
                         );
                     }
                 }
@@ -1007,7 +1007,7 @@ impl EditPredictionButton {
                 ContextMenuEntry::new("This file is excluded.")
                     .disabled(true)
                     .icon(icons.disabled)
-                    .icon_size(IconSize::Small),
+                    .icon_size(IconSize::XSmall),
             );
         }
 

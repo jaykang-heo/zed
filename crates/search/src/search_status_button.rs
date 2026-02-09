@@ -23,7 +23,7 @@ impl Render for SearchButton {
 
         button.child(
             IconButton::new("project-search-indicator", SEARCH_ICON)
-                .icon_size(IconSize::Small)
+                .icon_size(IconSize::XSmall)
                 .tooltip(|_window, cx| {
                     Tooltip::for_action("Project Search", &workspace::DeploySearch::default(), cx)
                 })
