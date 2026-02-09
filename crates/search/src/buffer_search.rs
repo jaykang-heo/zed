@@ -14,7 +14,7 @@ use any_vec::AnyVec;
 use collections::HashMap;
 use editor::{
     DisplayPoint, Editor, EditorSettings, MultiBufferOffset, SplitDiffFeatureFlag,
-    SplittableEditor, ToggleLinkedCursors, ToggleDiffView,
+    SplittableEditor, ToggleDiffView, ToggleLinkedCursors,
     actions::{Backtab, FoldAll, Tab, ToggleFoldAll, UnfoldAll},
 };
 use feature_flags::FeatureFlagAppExt as _;
@@ -162,10 +162,8 @@ impl Render for BufferSearchBar {
                                     })
                                     .on_click(move |_, window, cx| {
                                         focus_handle.focus(window, cx);
-                                        window.dispatch_action(
-                                            ToggleLinkedCursors.boxed_clone(),
-                                            cx,
-                                        );
+                                        window
+                                            .dispatch_action(ToggleLinkedCursors.boxed_clone(), cx);
                                     }),
                             )
                         })
