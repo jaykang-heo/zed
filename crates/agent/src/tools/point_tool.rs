@@ -43,6 +43,24 @@ pub struct PointToolInput {
     start_line: Option<u32>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PointToolOutput {
+    pub matched_code: Option<String>,
+    pub fallback_message: Option<String>,
+}
+
+impl From<PointToolOutput> for LanguageModelToolResultContent {
+    fn from(output: PointToolOutput) -> Self {
+        if let Some(code) = &output.matched_code {
+            LanguageModelToolResultContent::Text(Arc::from(code.as_str()))
+        } else if let Some(message) = &output.fallback_message {
+            LanguageModelToolResultContent::Text(Arc::from(message.as_str()))
+        } else {
+            LanguageModelToolResultContent::Text(Arc::from(""))
+        }
+    }
+}
+
 pub struct PointTool {
     project: Entity<Project>,
     #[allow(dead_code)]
@@ -74,7 +92,7 @@ impl PointTool {
 
 impl AgentTool for PointTool {
     type Input = PointToolInput;
-    type Output = LanguageModelToolResultContent;
+    type Output = PointToolOutput;
 
     const NAME: &'static str = "point";
 
@@ -105,7 +123,7 @@ impl AgentTool for PointTool {
         input: Self::Input,
         event_stream: ToolCallEventStream,
         cx: &mut App,
-    ) -> Task<Result<LanguageModelToolResultContent>> {
+    ) -> Task<Result<PointToolOutput>> {
         let Some(project_path) = self.project.read(cx).find_project_path(&input.path, cx) else {
             return Task::ready(Err(anyhow!("Path {} not found in project", &input.path)));
         };
@@ -267,8 +285,39 @@ impl AgentTool for PointTool {
                 }
             }
 
-            Ok(result_text.into())
+            Ok(if is_fallback {
+                PointToolOutput {
+                    matched_code: None,
+                    fallback_message: Some(result_text),
+                }
+            } else {
+                PointToolOutput {
+                    matched_code: Some(result_text),
+                    fallback_message: None,
+                }
+            })
         })
+    }
+
+    fn replay(
+        &self,
+        input: Self::Input,
+        output: Self::Output,
+        event_stream: ToolCallEventStream,
+        _cx: &mut App,
+    ) -> Result<()> {
+        if let Some(code) = &output.matched_code {
+            let markdown = MarkdownCodeBlock {
+                tag: &input.path,
+                text: code,
+            }
+            .to_string();
+            event_stream.update_fields(ToolCallUpdateFields::new().content(vec![
+                acp::ToolCallContent::Content(acp::Content::new(markdown)),
+            ]));
+        }
+
+        Ok(())
     }
 
     fn rebind_thread(
@@ -523,12 +572,13 @@ mod tests {
         // Await the task
         let result = task.await;
         assert!(result.is_ok(), "Expected Ok result, got: {:?}", result);
-        let result_content = result.unwrap();
-        let result_text = result_content
-            .to_str()
-            .expect("Expected text result content");
+        let output = result.unwrap();
+        let matched_code = output
+            .matched_code
+            .as_ref()
+            .expect("Expected matched_code in output");
         assert!(
-            result_text.contains("goodbye world"),
+            matched_code.contains("goodbye world"),
             "Result should contain matched text"
         );
 
@@ -577,13 +627,18 @@ mod tests {
 
         let result = task.await;
         assert!(result.is_ok(), "Expected Ok result, got: {:?}", result);
-        let result_content = result.unwrap();
-        let result_text = result_content
-            .to_str()
-            .expect("Expected text result content");
+        let output = result.unwrap();
         assert!(
-            result_text.contains("Fell back to line 5"),
-            "Result should mention fallback, got: {result_text}"
+            output.matched_code.is_none(),
+            "Fallback should not have matched_code"
+        );
+        let fallback_message = output
+            .fallback_message
+            .as_ref()
+            .expect("Expected fallback_message in output");
+        assert!(
+            fallback_message.contains("Fell back to line 5"),
+            "Result should mention fallback, got: {fallback_message}"
         );
 
         // Verify AgentLocation points at line 5 (0-indexed row 4)
@@ -700,5 +755,78 @@ mod tests {
                 .contains("cancelled by user"),
             "Expected cancellation error"
         );
+    }
+
+    #[gpui::test]
+    async fn test_point_tool_replay(cx: &mut TestAppContext) {
+        init_test(cx);
+        let setup = setup_point_tool_with_example_file(cx).await;
+
+        // Replay with a fuzzy match result should re-emit content
+        {
+            let (event_stream, mut receiver) = ToolCallEventStream::test();
+            cx.update(|cx| {
+                setup
+                    .tool
+                    .replay(
+                        PointToolInput {
+                            path: "root/example.rs".to_string(),
+                            code: "println!(\"goodbye world\")".to_string(),
+                            start_line: None,
+                        },
+                        PointToolOutput {
+                            matched_code: Some("    println!(\"goodbye world\");".to_string()),
+                            fallback_message: None,
+                        },
+                        event_stream,
+                        cx,
+                    )
+                    .unwrap();
+            });
+
+            let fields = receiver.expect_update_fields().await;
+            let content = fields
+                .content
+                .expect("Replay of fuzzy match should emit content");
+            assert!(!content.is_empty());
+            let content_str = format!("{:?}", content);
+            assert!(
+                content_str.contains("goodbye world"),
+                "Replayed content should contain the matched code, got: {content_str}"
+            );
+        }
+
+        // Replay with a fallback result should NOT emit content
+        {
+            let (event_stream, mut receiver) = ToolCallEventStream::test();
+            cx.update(|cx| {
+                setup
+                    .tool
+                    .replay(
+                        PointToolInput {
+                            path: "root/example.rs".to_string(),
+                            code: "nonexistent".to_string(),
+                            start_line: Some(5),
+                        },
+                        PointToolOutput {
+                            matched_code: None,
+                            fallback_message: Some(
+                                "Could not find the exact code snippet. Fell back to line 5."
+                                    .to_string(),
+                            ),
+                        },
+                        event_stream,
+                        cx,
+                    )
+                    .unwrap();
+            });
+
+            // The event_stream was dropped after replay() with no events sent,
+            // so the channel sender is closed and try_next returns Ok(None).
+            assert!(
+                matches!(receiver.try_next(), Ok(None)),
+                "Replay of fallback should not emit any events"
+            );
+        }
     }
 }

@@ -494,6 +494,9 @@ impl AcpThreadView {
                     self.expanded_tool_calls.insert(tool_call_id.clone());
                 }
             }
+            ViewEvent::NewContent(tool_call_id) => {
+                self.expanded_tool_calls.insert(tool_call_id.clone());
+            }
             ViewEvent::TerminalMovedToBackground(tool_call_id) => {
                 self.expanded_tool_calls.remove(tool_call_id);
             }

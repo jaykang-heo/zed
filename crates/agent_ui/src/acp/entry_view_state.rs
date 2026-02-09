@@ -4,7 +4,7 @@ use super::thread_history::AcpThreadHistory;
 use acp_thread::{AcpThread, AgentThreadEntry};
 use agent::ThreadStore;
 use agent_client_protocol::{self as acp, ToolCallId};
-use collections::HashMap;
+use collections::{HashMap, HashSet};
 use editor::{Editor, EditorMode, MinimapVisibility, SizingBehavior};
 use gpui::{
     AnyEntity, App, AppContext as _, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
@@ -28,6 +28,7 @@ pub struct EntryViewState {
     history: WeakEntity<AcpThreadHistory>,
     prompt_store: Option<Entity<PromptStore>>,
     entries: Vec<Entry>,
+    content_notified: HashSet<ToolCallId>,
     prompt_capabilities: Rc<RefCell<acp::PromptCapabilities>>,
     available_commands: Rc<RefCell<Vec<acp::AvailableCommand>>>,
     agent_name: SharedString,
@@ -51,6 +52,7 @@ impl EntryViewState {
             history,
             prompt_store,
             entries: Vec::new(),
+            content_notified: HashSet::default(),
             prompt_capabilities,
             available_commands,
             agent_name,
@@ -123,6 +125,7 @@ impl EntryViewState {
                 let id = tool_call.id.clone();
                 let terminals = tool_call.terminals().cloned().collect::<Vec<_>>();
                 let diffs = tool_call.diffs().cloned().collect::<Vec<_>>();
+                let has_content = !tool_call.content.is_empty();
 
                 let views = if let Some(Entry::Content(views)) = self.entries.get_mut(index) {
                     views
@@ -165,7 +168,7 @@ impl EntryViewState {
                     }
                 }
 
-                for diff in diffs {
+                for diff in &diffs {
                     views.entry(diff.entity_id()).or_insert_with(|| {
                         let element = create_editor_diff(diff.clone(), window, cx).into_any();
                         cx.emit(EntryViewEvent {
@@ -173,6 +176,13 @@ impl EntryViewState {
                             view_event: ViewEvent::NewDiff(id.clone()),
                         });
                         element
+                    });
+                }
+
+                if has_content && diffs.is_empty() && self.content_notified.insert(id.clone()) {
+                    cx.emit(EntryViewEvent {
+                        entry_index: index,
+                        view_event: ViewEvent::NewContent(id.clone()),
                     });
                 }
             }
@@ -239,6 +249,7 @@ pub struct EntryViewEvent {
 pub enum ViewEvent {
     NewDiff(ToolCallId),
     NewTerminal(ToolCallId),
+    NewContent(ToolCallId),
     TerminalMovedToBackground(ToolCallId),
     MessageEditorEvent(Entity<MessageEditor>, MessageEditorEvent),
 }
