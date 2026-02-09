@@ -364,7 +364,7 @@ struct StackedDiffView;
 
 #[derive(Clone, Copy, PartialEq, Eq, Action, Default)]
 #[action(namespace = editor)]
-pub struct ToggleSplitDiff;
+pub struct ToggleDiffView;
 
 #[derive(Clone, Copy, PartialEq, Eq, Action, Default)]
 #[action(namespace = editor)]
@@ -843,7 +843,7 @@ impl SplittableEditor {
         });
     }
 
-    fn toggle_split(&mut self, _: &ToggleSplitDiff, window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_split(&mut self, _: &ToggleDiffView, window: &mut Window, cx: &mut Context<Self>) {
         if self.lhs.is_some() {
             self.unsplit(&StackedDiffView, window, cx);
         } else {
