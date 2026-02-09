@@ -1,450 +1,27 @@
-use crate::AgentTool;
-use crate::tools::TerminalTool;
-use agent_settings::{AgentSettings, CompiledRegex, ToolPermissions, ToolRules};
-use settings::ToolPermissionMode;
-use shell_command_parser::extract_commands;
-use std::path::{Component, Path};
-use std::sync::LazyLock;
+pub use agent_settings::{
+    ToolPermissionDecision, ToolPermissions, decide_tool_permission, normalize_path,
+};
+
+use agent_settings::AgentSettings;
 use util::shell::ShellKind;
-
-const HARDCODED_SECURITY_DENIAL_MESSAGE: &str = "Blocked by built-in security rule. This operation is considered too \
-     harmful to be allowed, and cannot be overridden by settings.";
-
-/// Security rules that are always enforced and cannot be overridden by any setting.
-/// These protect against catastrophic operations like wiping filesystems.
-pub struct HardcodedSecurityRules {
-    pub terminal_deny: Vec<CompiledRegex>,
-}
-
-pub static HARDCODED_SECURITY_RULES: LazyLock<HardcodedSecurityRules> = LazyLock::new(|| {
-    // Flag group matches any short flags (-rf, -rfv, -v, etc.) or long flags (--recursive, --force, etc.)
-    // This ensures extra flags like -rfv, -v -rf, --recursive --force don't bypass the rules.
-    const FLAGS: &str = r"(--[a-zA-Z0-9][-a-zA-Z0-9_]*(=[^\s]*)?\s+|-[a-zA-Z]+\s+)*";
-    // Trailing flags that may appear after the path operand (GNU rm accepts flags after operands)
-    const TRAILING_FLAGS: &str = r"(\s+--[a-zA-Z0-9][-a-zA-Z0-9_]*(=[^\s]*)?|\s+-[a-zA-Z]+)*\s*";
-
-    HardcodedSecurityRules {
-        terminal_deny: vec![
-            // Recursive deletion of root - "rm -rf /", "rm -rfv /", "rm -rf /*", "rm / -rf"
-            CompiledRegex::new(
-                &format!(r"\brm\s+{FLAGS}(--\s+)?/\*?{TRAILING_FLAGS}$"),
-                false,
-            )
-            .expect("hardcoded regex should compile"),
-            // Recursive deletion of home - "rm -rf ~" or "rm -rf ~/" or "rm -rf ~/*" or "rm ~ -rf" (but not ~/subdir)
-            CompiledRegex::new(
-                &format!(r"\brm\s+{FLAGS}(--\s+)?~/?\*?{TRAILING_FLAGS}$"),
-                false,
-            )
-            .expect("hardcoded regex should compile"),
-            // Recursive deletion of home via $HOME - "rm -rf $HOME" or "rm -rf ${HOME}" or "rm $HOME -rf" or with /*
-            CompiledRegex::new(
-                &format!(r"\brm\s+{FLAGS}(--\s+)?(\$HOME|\$\{{HOME\}})/?(\*)?{TRAILING_FLAGS}$"),
-                false,
-            )
-            .expect("hardcoded regex should compile"),
-            // Recursive deletion of current directory - "rm -rf ." or "rm -rf ./" or "rm -rf ./*" or "rm . -rf"
-            CompiledRegex::new(
-                &format!(r"\brm\s+{FLAGS}(--\s+)?\./?\*?{TRAILING_FLAGS}$"),
-                false,
-            )
-            .expect("hardcoded regex should compile"),
-            // Recursive deletion of parent directory - "rm -rf .." or "rm -rf ../" or "rm -rf ../*" or "rm .. -rf"
-            CompiledRegex::new(
-                &format!(r"\brm\s+{FLAGS}(--\s+)?\.\./?\*?{TRAILING_FLAGS}$"),
-                false,
-            )
-            .expect("hardcoded regex should compile"),
-        ],
-    }
-});
-
-/// Checks if input matches any hardcoded security rules that cannot be bypassed.
-/// Returns a Deny decision if blocked, None otherwise.
-fn check_hardcoded_security_rules(
-    tool_name: &str,
-    input: &str,
-    shell_kind: ShellKind,
-) -> Option<ToolPermissionDecision> {
-    // Currently only terminal tool has hardcoded rules
-    if tool_name != TerminalTool::NAME {
-        return None;
-    }
-
-    let rules = &*HARDCODED_SECURITY_RULES;
-    let terminal_patterns = &rules.terminal_deny;
-
-    // First: check the original input as-is (and its path-normalized form)
-    if matches_hardcoded_patterns(input, terminal_patterns) {
-        return Some(ToolPermissionDecision::Deny(
-            HARDCODED_SECURITY_DENIAL_MESSAGE.into(),
-        ));
-    }
-
-    // Second: parse and check individual sub-commands (for chained commands)
-    if shell_kind.supports_posix_chaining() {
-        if let Some(commands) = extract_commands(input) {
-            for command in &commands {
-                if matches_hardcoded_patterns(command, terminal_patterns) {
-                    return Some(ToolPermissionDecision::Deny(
-                        HARDCODED_SECURITY_DENIAL_MESSAGE.into(),
-                    ));
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// Checks a single command against hardcoded patterns, both as-is and with
-/// path arguments normalized (to catch traversal bypasses like `rm -rf /tmp/../../`
-/// and multi-path bypasses like `rm -rf /tmp /`).
-fn matches_hardcoded_patterns(command: &str, patterns: &[CompiledRegex]) -> bool {
-    for pattern in patterns {
-        if pattern.is_match(command) {
-            return true;
-        }
-    }
-
-    for expanded in expand_rm_to_single_path_commands(command) {
-        for pattern in patterns {
-            if pattern.is_match(&expanded) {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
-/// For rm commands, expands multi-path arguments into individual single-path
-/// commands with normalized paths. This catches both traversal bypasses like
-/// `rm -rf /tmp/../../` and multi-path bypasses like `rm -rf /tmp /`.
-fn expand_rm_to_single_path_commands(command: &str) -> Vec<String> {
-    let trimmed = command.trim();
-
-    let first_token = trimmed.split_whitespace().next();
-    if !first_token.is_some_and(|t| t.eq_ignore_ascii_case("rm")) {
-        return vec![];
-    }
-
-    let parts: Vec<&str> = trimmed.split_whitespace().collect();
-    let mut flags = Vec::new();
-    let mut paths = Vec::new();
-    let mut past_double_dash = false;
-
-    for part in parts.iter().skip(1) {
-        if !past_double_dash && *part == "--" {
-            past_double_dash = true;
-            flags.push(*part);
-            continue;
-        }
-        if !past_double_dash && part.starts_with('-') {
-            flags.push(*part);
-        } else {
-            paths.push(*part);
-        }
-    }
-
-    let flags_str = if flags.is_empty() {
-        String::new()
-    } else {
-        format!("{} ", flags.join(" "))
-    };
-
-    let mut results = Vec::new();
-    for path in &paths {
-        if path.starts_with('$') {
-            let home_prefix = if path.starts_with("${HOME}") {
-                Some("${HOME}")
-            } else if path.starts_with("$HOME") {
-                Some("$HOME")
-            } else {
-                None
-            };
-
-            if let Some(prefix) = home_prefix {
-                let suffix = &path[prefix.len()..];
-                if suffix.is_empty() {
-                    results.push(format!("rm {flags_str}{path}"));
-                } else if suffix.starts_with('/') {
-                    let normalized_suffix = normalize_path(suffix);
-                    let reconstructed = if normalized_suffix == "/" {
-                        prefix.to_string()
-                    } else {
-                        format!("{prefix}{normalized_suffix}")
-                    };
-                    results.push(format!("rm {flags_str}{reconstructed}"));
-                } else {
-                    results.push(format!("rm {flags_str}{path}"));
-                }
-            } else {
-                results.push(format!("rm {flags_str}{path}"));
-            }
-            continue;
-        }
-
-        let mut normalized = normalize_path(path);
-        if normalized.is_empty() && !Path::new(path).has_root() {
-            normalized = ".".to_string();
-        }
-
-        results.push(format!("rm {flags_str}{normalized}"));
-    }
-
-    results
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ToolPermissionDecision {
-    Allow,
-    Deny(String),
-    Confirm,
-}
-
-impl ToolPermissionDecision {
-    /// Determines the permission decision for a tool invocation based on configured rules.
-    ///
-    /// # Precedence Order (highest to lowest)
-    ///
-    /// 1. **Hardcoded security rules** - Critical safety checks (e.g., blocking `rm -rf /`)
-    ///    that cannot be bypassed by any user settings, including `always_allow_tool_actions`.
-    /// 2. **`always_allow_tool_actions`** - When enabled, allows all tool actions without
-    ///    prompting. This global setting bypasses user-configured deny/confirm/allow patterns,
-    ///    but does **not** bypass hardcoded security rules.
-    /// 3. **`always_deny`** - If any deny pattern matches, the tool call is blocked immediately.
-    ///    This takes precedence over `always_confirm` and `always_allow` patterns.
-    /// 4. **`always_confirm`** - If any confirm pattern matches (and no deny matched),
-    ///    the user is prompted for confirmation.
-    /// 5. **`always_allow`** - If any allow pattern matches (and no deny/confirm matched),
-    ///    the tool call proceeds without prompting.
-    /// 6. **`default_mode`** - If no patterns match, falls back to the tool's default mode.
-    ///
-    /// # Shell Compatibility (Terminal Tool Only)
-    ///
-    /// For the terminal tool, commands are parsed to extract sub-commands for security.
-    /// All currently supported `ShellKind` variants are treated as compatible because
-    /// brush-parser can handle their command chaining syntax. If a new `ShellKind`
-    /// variant is added that brush-parser cannot safely parse, it should be excluded
-    /// from `ShellKind::supports_posix_chaining()`, which will cause `always_allow`
-    /// patterns to be disabled for that shell.
-    ///
-    /// # Pattern Matching Tips
-    ///
-    /// Patterns are matched as regular expressions against the tool input (e.g., the command
-    /// string for the terminal tool). Some tips for writing effective patterns:
-    ///
-    /// - Use word boundaries (`\b`) to avoid partial matches. For example, pattern `rm` will
-    ///   match "storm" and "arms", but `\brm\b` will only match the standalone word "rm".
-    ///   This is important for security rules where you want to block specific commands
-    ///   without accidentally blocking unrelated commands that happen to contain the same
-    ///   substring.
-    /// - Patterns are case-insensitive by default. Set `case_sensitive: true` for exact matching.
-    /// - Use `^` and `$` anchors to match the start/end of the input.
-    pub fn from_input(
-        tool_name: &str,
-        input: &str,
-        permissions: &ToolPermissions,
-        always_allow_tool_actions: bool,
-        shell_kind: ShellKind,
-    ) -> ToolPermissionDecision {
-        // First, check hardcoded security rules, such as banning `rm -rf /` in terminal tool.
-        // These cannot be bypassed by any user settings.
-        if let Some(denial) = check_hardcoded_security_rules(tool_name, input, shell_kind) {
-            return denial;
-        }
-
-        // If always_allow_tool_actions is enabled, bypass user-configured permission checks.
-        // Note: This no longer bypasses hardcoded security rules (checked above).
-        if always_allow_tool_actions {
-            return ToolPermissionDecision::Allow;
-        }
-
-        let rules = match permissions.tools.get(tool_name) {
-            Some(rules) => rules,
-            None => {
-                return ToolPermissionDecision::Confirm;
-            }
-        };
-
-        // Check for invalid regex patterns before evaluating rules.
-        // If any patterns failed to compile, block the tool call entirely.
-        if let Some(error) = check_invalid_patterns(tool_name, rules) {
-            return ToolPermissionDecision::Deny(error);
-        }
-
-        // For the terminal tool, parse the command to extract all sub-commands.
-        // This prevents shell injection attacks where a user configures an allow
-        // pattern like "^ls" and an attacker crafts "ls && rm -rf /".
-        //
-        // If parsing fails or the shell syntax is unsupported, always_allow is
-        // disabled for this command (we set allow_enabled to false to signal this).
-        if tool_name == TerminalTool::NAME {
-            // Our shell parser (brush-parser) only supports POSIX-like shell syntax.
-            // See the doc comment above for the list of compatible/incompatible shells.
-            if !shell_kind.supports_posix_chaining() {
-                // For shells with incompatible syntax, we can't reliably parse
-                // the command to extract sub-commands.
-                if !rules.always_allow.is_empty() {
-                    // If the user has configured always_allow patterns, we must deny
-                    // because we can't safely verify the command doesn't contain
-                    // hidden sub-commands that bypass the allow patterns.
-                    return ToolPermissionDecision::Deny(format!(
-                        "The {} shell does not support \"always allow\" patterns for the terminal \
-                         tool because Zed cannot parse its command chaining syntax. Please remove \
-                         the always_allow patterns from your tool_permissions settings, or switch \
-                         to a POSIX-conforming shell.",
-                        shell_kind
-                    ));
-                }
-                // No always_allow rules, so we can still check deny/confirm patterns.
-                return check_commands(std::iter::once(input.to_string()), rules, tool_name, false);
-            }
-
-            match extract_commands(input) {
-                Some(commands) => check_commands(commands, rules, tool_name, true),
-                None => {
-                    // The command failed to parse, so we check to see if we should auto-deny
-                    // or auto-confirm; if neither auto-deny nor auto-confirm applies here,
-                    // fall back on the default (based on the user's settings, which is Confirm
-                    // if not specified otherwise). Ignore "always allow" when it failed to parse.
-                    check_commands(std::iter::once(input.to_string()), rules, tool_name, false)
-                }
-            }
-        } else {
-            check_commands(std::iter::once(input.to_string()), rules, tool_name, true)
-        }
-    }
-}
-
-/// Evaluates permission rules against a set of commands.
-///
-/// This function performs a single pass through all commands with the following logic:
-/// - **DENY**: If ANY command matches a deny pattern, deny immediately (short-circuit)
-/// - **CONFIRM**: Track if ANY command matches a confirm pattern
-/// - **ALLOW**: Track if ALL commands match at least one allow pattern
-///
-/// The `allow_enabled` flag controls whether allow patterns are checked. This is set
-/// to `false` when we can't reliably parse shell commands (e.g., parse failures or
-/// unsupported shell syntax), ensuring we don't auto-allow potentially dangerous commands.
-fn check_commands(
-    commands: impl IntoIterator<Item = String>,
-    rules: &ToolRules,
-    tool_name: &str,
-    allow_enabled: bool,
-) -> ToolPermissionDecision {
-    // Single pass through all commands:
-    // - DENY: If ANY command matches a deny pattern, deny immediately (short-circuit)
-    // - CONFIRM: Track if ANY command matches a confirm pattern
-    // - ALLOW: Track if ALL commands match at least one allow pattern
-    let mut any_matched_confirm = false;
-    let mut all_matched_allow = true;
-
-    for command in commands {
-        // DENY: immediate return if any command matches a deny pattern
-        if rules.always_deny.iter().any(|r| r.is_match(&command)) {
-            return ToolPermissionDecision::Deny(format!(
-                "Command blocked by security rule for {} tool",
-                tool_name
-            ));
-        }
-
-        // CONFIRM: remember if any command matches a confirm pattern
-        if rules.always_confirm.iter().any(|r| r.is_match(&command)) {
-            any_matched_confirm = true;
-        }
-
-        // ALLOW: track if all commands match at least one allow pattern
-        if !rules.always_allow.iter().any(|r| r.is_match(&command)) {
-            all_matched_allow = false;
-        }
-    }
-
-    // After processing all commands, check accumulated state
-    if any_matched_confirm {
-        return ToolPermissionDecision::Confirm;
-    }
-
-    if allow_enabled && all_matched_allow && !commands.is_empty() {
-        return ToolPermissionDecision::Allow;
-    }
-
-    match rules.default_mode {
-        ToolPermissionMode::Deny => {
-            ToolPermissionDecision::Deny(format!("{} tool is disabled", tool_name))
-        }
-        ToolPermissionMode::Allow => ToolPermissionDecision::Allow,
-        ToolPermissionMode::Confirm => ToolPermissionDecision::Confirm,
-    }
-}
-
-/// Checks if the tool rules contain any invalid regex patterns.
-/// Returns an error message if invalid patterns are found.
-fn check_invalid_patterns(tool_name: &str, rules: &ToolRules) -> Option<String> {
-    if rules.invalid_patterns.is_empty() {
-        return None;
-    }
-
-    let count = rules.invalid_patterns.len();
-    let pattern_word = if count == 1 { "pattern" } else { "patterns" };
-
-    Some(format!(
-        "The {} tool cannot run because {} regex {} failed to compile. \
-         Please fix the invalid patterns in your tool_permissions settings.",
-        tool_name, count, pattern_word
-    ))
-}
 
 /// Convenience wrapper that extracts permission settings from `AgentSettings`.
 ///
 /// This is the primary entry point for tools to check permissions. It extracts
 /// `tool_permissions` and `always_allow_tool_actions` from the settings and
-/// delegates to [`ToolPermissionDecision::from_input`], using the system shell.
+/// delegates to [`decide_tool_permission`], using the system shell.
 pub fn decide_permission_from_settings(
     tool_name: &str,
     input: &str,
     settings: &AgentSettings,
 ) -> ToolPermissionDecision {
-    ToolPermissionDecision::from_input(
+    decide_tool_permission(
         tool_name,
         input,
         &settings.tool_permissions,
         settings.always_allow_tool_actions,
         ShellKind::system(),
     )
-}
-
-/// Normalizes a path by collapsing `.` and `..` segments without touching the filesystem.
-fn normalize_path(raw: &str) -> String {
-    let is_absolute = Path::new(raw).has_root();
-    let mut components: Vec<&str> = Vec::new();
-    for component in Path::new(raw).components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if components.last() == Some(&"..") {
-                    components.push("..");
-                } else if !components.is_empty() {
-                    components.pop();
-                } else if !is_absolute {
-                    components.push("..");
-                }
-            }
-            Component::Normal(segment) => {
-                if let Some(s) = segment.to_str() {
-                    components.push(s);
-                }
-            }
-            Component::RootDir | Component::Prefix(_) => {}
-        }
-    }
-    let joined = components.join("/");
-    if is_absolute {
-        format!("/{joined}")
-    } else {
-        joined
-    }
 }
 
 /// Decides permission by checking both the raw input path and a simplified/canonicalized
@@ -488,7 +65,9 @@ mod tests {
     use crate::tools::{EditFileTool, TerminalTool};
     use agent_settings::{AgentProfileId, CompiledRegex, InvalidRegexPattern, ToolRules};
     use gpui::px;
-    use settings::{DefaultAgentView, DockPosition, DockSide, NotifyWhenAgentWaiting};
+    use settings::{
+        DefaultAgentView, DockPosition, DockSide, NotifyWhenAgentWaiting, ToolPermissionMode,
+    };
     use std::sync::Arc;
 
     fn test_agent_settings(
@@ -646,7 +225,7 @@ mod tests {
                     invalid_patterns: vec![],
                 },
             );
-            ToolPermissionDecision::from_input(
+            decide_tool_permission(
                 self.tool,
                 self.input,
                 &ToolPermissions { tools },
@@ -661,7 +240,7 @@ mod tests {
     }
 
     fn no_rules(input: &str, global: bool) -> ToolPermissionDecision {
-        ToolPermissionDecision::from_input(
+        decide_tool_permission(
             TerminalTool::NAME,
             input,
             &ToolPermissions {
@@ -906,28 +485,16 @@ mod tests {
         let p = ToolPermissions { tools };
         // With always_allow_tool_actions=true, even default_mode: Deny is overridden
         assert_eq!(
-            ToolPermissionDecision::from_input(TerminalTool::NAME, "x", &p, true, ShellKind::Posix),
+            decide_tool_permission(TerminalTool::NAME, "x", &p, true, ShellKind::Posix),
             ToolPermissionDecision::Allow
         );
         // With always_allow_tool_actions=false, default_mode: Deny is respected
         assert!(matches!(
-            ToolPermissionDecision::from_input(
-                TerminalTool::NAME,
-                "x",
-                &p,
-                false,
-                ShellKind::Posix
-            ),
+            decide_tool_permission(TerminalTool::NAME, "x", &p, false, ShellKind::Posix),
             ToolPermissionDecision::Deny(_)
         ));
         assert_eq!(
-            ToolPermissionDecision::from_input(
-                EditFileTool::NAME,
-                "x",
-                &p,
-                false,
-                ShellKind::Posix
-            ),
+            decide_tool_permission(EditFileTool::NAME, "x", &p, false, ShellKind::Posix),
             ToolPermissionDecision::Allow
         );
     }
@@ -948,13 +515,7 @@ mod tests {
         let p = ToolPermissions { tools };
         // "terminal" should not match "term" rules, so falls back to Confirm (no rules)
         assert_eq!(
-            ToolPermissionDecision::from_input(
-                TerminalTool::NAME,
-                "x",
-                &p,
-                false,
-                ShellKind::Posix
-            ),
+            decide_tool_permission(TerminalTool::NAME, "x", &p, false, ShellKind::Posix),
             ToolPermissionDecision::Confirm
         );
     }
@@ -982,24 +543,12 @@ mod tests {
         };
         // With global=true, all checks are bypassed including invalid pattern check
         assert!(matches!(
-            ToolPermissionDecision::from_input(
-                TerminalTool::NAME,
-                "echo hi",
-                &p,
-                true,
-                ShellKind::Posix
-            ),
+            decide_tool_permission(TerminalTool::NAME, "echo hi", &p, true, ShellKind::Posix),
             ToolPermissionDecision::Allow
         ));
         // With global=false, invalid patterns block the tool
         assert!(matches!(
-            ToolPermissionDecision::from_input(
-                TerminalTool::NAME,
-                "echo hi",
-                &p,
-                false,
-                ShellKind::Posix
-            ),
+            decide_tool_permission(TerminalTool::NAME, "echo hi", &p, false, ShellKind::Posix),
             ToolPermissionDecision::Deny(_)
         ));
     }
@@ -1197,23 +746,11 @@ mod tests {
         );
         let p = ToolPermissions { tools };
         assert!(matches!(
-            ToolPermissionDecision::from_input(
-                TerminalTool::NAME,
-                "x",
-                &p,
-                false,
-                ShellKind::Posix
-            ),
+            decide_tool_permission(TerminalTool::NAME, "x", &p, false, ShellKind::Posix),
             ToolPermissionDecision::Deny(_)
         ));
         assert_eq!(
-            ToolPermissionDecision::from_input(
-                "mcp:srv:terminal",
-                "x",
-                &p,
-                false,
-                ShellKind::Posix
-            ),
+            decide_tool_permission("mcp:srv:terminal", "x", &p, false, ShellKind::Posix),
             ToolPermissionDecision::Allow
         );
     }
@@ -1311,13 +848,8 @@ mod tests {
         );
         let p = ToolPermissions { tools };
 
-        let result = ToolPermissionDecision::from_input(
-            TerminalTool::NAME,
-            "echo hi",
-            &p,
-            false,
-            ShellKind::Posix,
-        );
+        let result =
+            decide_tool_permission(TerminalTool::NAME, "echo hi", &p, false, ShellKind::Posix);
         match result {
             ToolPermissionDecision::Deny(msg) => {
                 assert!(

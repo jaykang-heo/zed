@@ -14,12 +14,16 @@ use settings::{
     DefaultAgentView, DockPosition, DockSide, LanguageModelParameters, LanguageModelSelection,
     NotifyWhenAgentWaiting, RegisterSetting, Settings, ToolPermissionMode,
 };
+use shell_command_parser::extract_commands;
+use util::shell::ShellKind;
 
 pub use crate::agent_profile::*;
 
 pub const SUMMARIZE_THREAD_PROMPT: &str = include_str!("prompts/summarize_thread_prompt.txt");
 pub const SUMMARIZE_THREAD_DETAILED_PROMPT: &str =
     include_str!("prompts/summarize_thread_detailed_prompt.txt");
+
+pub const TERMINAL_TOOL_NAME: &str = "terminal";
 
 #[derive(Clone, Debug, RegisterSetting)]
 pub struct AgentSettings {
@@ -202,6 +206,13 @@ impl CompiledRegex {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolPermissionDecision {
+    Allow,
+    Deny(String),
+    Confirm,
+}
+
 pub const HARDCODED_SECURITY_DENIAL_MESSAGE: &str = "Blocked by built-in security rule. This operation is considered too \
      harmful to be allowed, and cannot be overridden by settings.";
 
@@ -247,17 +258,15 @@ pub static HARDCODED_SECURITY_RULES: LazyLock<HardcodedSecurityRules> = LazyLock
 /// Checks if input matches any hardcoded security rules that cannot be bypassed.
 /// Returns the denial reason string if blocked, None otherwise.
 ///
-/// `terminal_tool_name` should be the tool name used for the terminal tool
-/// (e.g. `"terminal"`). `extracted_commands` can optionally provide parsed
-/// sub-commands for chained command checking; callers with access to a shell
-/// parser should extract sub-commands and pass them here.
-pub fn check_hardcoded_security_rules(
+/// `extracted_commands` can optionally provide parsed sub-commands for chained
+/// command checking; callers with access to a shell parser should extract
+/// sub-commands and pass them here.
+fn check_hardcoded_security_rules(
     tool_name: &str,
-    terminal_tool_name: &str,
     input: &str,
     extracted_commands: Option<&[String]>,
 ) -> Option<String> {
-    if tool_name != terminal_tool_name {
+    if tool_name != TERMINAL_TOOL_NAME {
         return None;
     }
 
@@ -401,6 +410,204 @@ pub fn normalize_path(raw: &str) -> String {
     } else {
         joined
     }
+}
+
+/// Determines the permission decision for a tool invocation based on configured rules.
+///
+/// # Precedence Order (highest to lowest)
+///
+/// 1. **Hardcoded security rules** - Critical safety checks (e.g., blocking `rm -rf /`)
+///    that cannot be bypassed by any user settings, including `always_allow_tool_actions`.
+/// 2. **`always_allow_tool_actions`** - When enabled, allows all tool actions without
+///    prompting. This global setting bypasses user-configured deny/confirm/allow patterns,
+///    but does **not** bypass hardcoded security rules.
+/// 3. **`always_deny`** - If any deny pattern matches, the tool call is blocked immediately.
+///    This takes precedence over `always_confirm` and `always_allow` patterns.
+/// 4. **`always_confirm`** - If any confirm pattern matches (and no deny matched),
+///    the user is prompted for confirmation.
+/// 5. **`always_allow`** - If any allow pattern matches (and no deny/confirm matched),
+///    the tool call proceeds without prompting.
+/// 6. **`default_mode`** - If no patterns match, falls back to the tool's default mode.
+///
+/// # Shell Compatibility (Terminal Tool Only)
+///
+/// For the terminal tool, commands are parsed to extract sub-commands for security.
+/// All currently supported `ShellKind` variants are treated as compatible because
+/// brush-parser can handle their command chaining syntax. If a new `ShellKind`
+/// variant is added that brush-parser cannot safely parse, it should be excluded
+/// from `ShellKind::supports_posix_chaining()`, which will cause `always_allow`
+/// patterns to be disabled for that shell.
+///
+/// # Pattern Matching Tips
+///
+/// Patterns are matched as regular expressions against the tool input (e.g., the command
+/// string for the terminal tool). Some tips for writing effective patterns:
+///
+/// - Use word boundaries (`\b`) to avoid partial matches. For example, pattern `rm` will
+///   match "storm" and "arms", but `\brm\b` will only match the standalone word "rm".
+/// - Patterns are case-insensitive by default. Set `case_sensitive: true` for exact matching.
+/// - Use `^` and `$` anchors to match the start/end of the input.
+pub fn decide_tool_permission(
+    tool_name: &str,
+    input: &str,
+    permissions: &ToolPermissions,
+    always_allow_tool_actions: bool,
+    shell_kind: ShellKind,
+) -> ToolPermissionDecision {
+    let is_terminal = tool_name == TERMINAL_TOOL_NAME;
+
+    // Extract sub-commands once for reuse by both hardcoded rules and pattern matching.
+    let extracted_commands = if is_terminal && shell_kind.supports_posix_chaining() {
+        extract_commands(input)
+    } else {
+        None
+    };
+
+    // First, check hardcoded security rules, such as banning `rm -rf /` in terminal tool.
+    // These cannot be bypassed by any user settings.
+    if let Some(reason) =
+        check_hardcoded_security_rules(tool_name, input, extracted_commands.as_deref())
+    {
+        return ToolPermissionDecision::Deny(reason);
+    }
+
+    // If always_allow_tool_actions is enabled, bypass user-configured permission checks.
+    // Note: This does not bypass hardcoded security rules (checked above).
+    if always_allow_tool_actions {
+        return ToolPermissionDecision::Allow;
+    }
+
+    let rules = match permissions.tools.get(tool_name) {
+        Some(rules) => rules,
+        None => {
+            return ToolPermissionDecision::Confirm;
+        }
+    };
+
+    // Check for invalid regex patterns before evaluating rules.
+    // If any patterns failed to compile, block the tool call entirely.
+    if let Some(error) = check_invalid_patterns(tool_name, rules) {
+        return ToolPermissionDecision::Deny(error);
+    }
+
+    // For the terminal tool, parse the command to extract all sub-commands.
+    // This prevents shell injection attacks where a user configures an allow
+    // pattern like "^ls" and an attacker crafts "ls && rm -rf /".
+    //
+    // If parsing fails or the shell syntax is unsupported, always_allow is
+    // disabled for this command (we set allow_enabled to false to signal this).
+    if is_terminal {
+        // Our shell parser (brush-parser) only supports POSIX-like shell syntax.
+        // See the doc comment above for the list of compatible/incompatible shells.
+        if !shell_kind.supports_posix_chaining() {
+            // For shells with incompatible syntax, we can't reliably parse
+            // the command to extract sub-commands.
+            if !rules.always_allow.is_empty() {
+                // If the user has configured always_allow patterns, we must deny
+                // because we can't safely verify the command doesn't contain
+                // hidden sub-commands that bypass the allow patterns.
+                return ToolPermissionDecision::Deny(format!(
+                    "The {} shell does not support \"always allow\" patterns for the terminal \
+                     tool because Zed cannot parse its command chaining syntax. Please remove \
+                     the always_allow patterns from your tool_permissions settings, or switch \
+                     to a POSIX-conforming shell.",
+                    shell_kind
+                ));
+            }
+            // No always_allow rules, so we can still check deny/confirm patterns.
+            return check_commands(std::iter::once(input.to_string()), rules, tool_name, false);
+        }
+
+        match extracted_commands {
+            Some(commands) => check_commands(commands, rules, tool_name, true),
+            None => {
+                // The command failed to parse, so we check to see if we should auto-deny
+                // or auto-confirm; if neither auto-deny nor auto-confirm applies here,
+                // fall back on the default (based on the user's settings, which is Confirm
+                // if not specified otherwise). Ignore "always allow" when it failed to parse.
+                check_commands(std::iter::once(input.to_string()), rules, tool_name, false)
+            }
+        }
+    } else {
+        check_commands(std::iter::once(input.to_string()), rules, tool_name, true)
+    }
+}
+
+/// Evaluates permission rules against a set of commands.
+///
+/// This function performs a single pass through all commands with the following logic:
+/// - **DENY**: If ANY command matches a deny pattern, deny immediately (short-circuit)
+/// - **CONFIRM**: Track if ANY command matches a confirm pattern
+/// - **ALLOW**: Track if ALL commands match at least one allow pattern
+///
+/// The `allow_enabled` flag controls whether allow patterns are checked. This is set
+/// to `false` when we can't reliably parse shell commands (e.g., parse failures or
+/// unsupported shell syntax), ensuring we don't auto-allow potentially dangerous commands.
+fn check_commands(
+    commands: impl IntoIterator<Item = String>,
+    rules: &ToolRules,
+    tool_name: &str,
+    allow_enabled: bool,
+) -> ToolPermissionDecision {
+    let mut any_matched_confirm = false;
+    let mut all_matched_allow = true;
+    let mut had_commands = false;
+
+    for command in commands {
+        had_commands = true;
+
+        // DENY: immediate return if any command matches a deny pattern
+        if rules.always_deny.iter().any(|r| r.is_match(&command)) {
+            return ToolPermissionDecision::Deny(format!(
+                "Command blocked by security rule for {} tool",
+                tool_name
+            ));
+        }
+
+        // CONFIRM: remember if any command matches a confirm pattern
+        if rules.always_confirm.iter().any(|r| r.is_match(&command)) {
+            any_matched_confirm = true;
+        }
+
+        // ALLOW: track if all commands match at least one allow pattern
+        if !rules.always_allow.iter().any(|r| r.is_match(&command)) {
+            all_matched_allow = false;
+        }
+    }
+
+    // After processing all commands, check accumulated state
+    if any_matched_confirm {
+        return ToolPermissionDecision::Confirm;
+    }
+
+    if allow_enabled && all_matched_allow && had_commands {
+        return ToolPermissionDecision::Allow;
+    }
+
+    match rules.default_mode {
+        ToolPermissionMode::Deny => {
+            ToolPermissionDecision::Deny(format!("{} tool is disabled", tool_name))
+        }
+        ToolPermissionMode::Allow => ToolPermissionDecision::Allow,
+        ToolPermissionMode::Confirm => ToolPermissionDecision::Confirm,
+    }
+}
+
+/// Checks if the tool rules contain any invalid regex patterns.
+/// Returns an error message if invalid patterns are found.
+fn check_invalid_patterns(tool_name: &str, rules: &ToolRules) -> Option<String> {
+    if rules.invalid_patterns.is_empty() {
+        return None;
+    }
+
+    let count = rules.invalid_patterns.len();
+    let pattern_word = if count == 1 { "pattern" } else { "patterns" };
+
+    Some(format!(
+        "The {} tool cannot run because {} regex {} failed to compile. \
+         Please fix the invalid patterns in your tool_permissions settings.",
+        tool_name, count, pattern_word
+    ))
 }
 
 impl Settings for AgentSettings {

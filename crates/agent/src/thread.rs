@@ -653,7 +653,7 @@ impl ToolPermissionContext {
     /// keywords), Rc (Plan 9 shell - no `&&`/`||` operators)
     ///
     /// For unsupported shells, we hide the "Always allow" UI options entirely, and if
-    /// the user has `always_allow` rules configured in settings, `ToolPermissionDecision::from_input`
+    /// the user has `always_allow` rules configured in settings, `decide_tool_permission`
     /// will return a `Deny` with an explanatory error message.
     pub fn build_permission_options(&self) -> acp_thread::PermissionOptions {
         use crate::pattern_extraction::*;

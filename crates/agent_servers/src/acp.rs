@@ -5,7 +5,7 @@ use acp_thread::{
 use acp_tools::AcpConnectionRegistry;
 use action_log::ActionLog;
 use agent_client_protocol::{self as acp, Agent as _, ErrorCode};
-use agent_settings::AgentSettings;
+use agent_settings::{AgentSettings, ToolPermissionDecision, decide_tool_permission};
 use anyhow::anyhow;
 use collections::HashMap;
 use feature_flags::{AcpBetaFeatureFlag, FeatureFlagAppExt as _};
@@ -14,11 +14,11 @@ use futures::{AsyncBufReadExt as _, FutureExt as _};
 use project::Project;
 use project::agent_server_store::AgentServerCommand;
 use serde::Deserialize;
-use settings::{Settings as _, ToolPermissionMode};
-use shell_command_parser::extract_commands;
+use settings::Settings as _;
 use task::ShellBuilder;
 use util::ResultExt as _;
 use util::process::Child;
+use util::shell::ShellKind;
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -1140,100 +1140,6 @@ struct ClientDelegate {
     cx: AsyncApp,
 }
 
-enum AcpPermissionDecision {
-    Allow,
-    Deny(String),
-    Confirm,
-}
-
-fn check_acp_tool_permission(
-    tool_name: &str,
-    input: &str,
-    settings: &AgentSettings,
-) -> AcpPermissionDecision {
-    let is_terminal = tool_name == "terminal";
-    let extracted_commands = if is_terminal {
-        extract_commands(input)
-    } else {
-        None
-    };
-
-    if let Some(denial) = agent_settings::check_hardcoded_security_rules(
-        tool_name,
-        "terminal",
-        input,
-        extracted_commands.as_deref(),
-    ) {
-        return AcpPermissionDecision::Deny(denial);
-    }
-
-    let rules = match settings.tool_permissions.tools.get(tool_name) {
-        Some(rules) => rules,
-        None => {
-            return AcpPermissionDecision::Confirm;
-        }
-    };
-
-    if !rules.invalid_patterns.is_empty() {
-        let pattern_list: Vec<&str> = rules
-            .invalid_patterns
-            .iter()
-            .map(|p| p.pattern.as_str())
-            .collect();
-        return AcpPermissionDecision::Deny(format!(
-            "Tool '{}' has invalid regex patterns that failed to compile: {}. \
-             Fix or remove these patterns in your settings to unblock this tool.",
-            tool_name,
-            pattern_list.join(", ")
-        ));
-    }
-
-    let allow_enabled = !is_terminal || extracted_commands.is_some();
-    let commands: Vec<String> = if is_terminal {
-        extracted_commands.unwrap_or_else(|| vec![input.to_string()])
-    } else {
-        vec![input.to_string()]
-    };
-
-    let mut any_matched_confirm = false;
-    let mut all_matched_allow = true;
-
-    for command in &commands {
-        for pattern in &rules.always_deny {
-            if pattern.is_match(command) {
-                return AcpPermissionDecision::Deny(format!(
-                    "Blocked by always_deny pattern: {}",
-                    pattern.pattern
-                ));
-            }
-        }
-
-        if rules.always_confirm.iter().any(|r| r.is_match(command)) {
-            any_matched_confirm = true;
-        }
-
-        if !rules.always_allow.iter().any(|r| r.is_match(command)) {
-            all_matched_allow = false;
-        }
-    }
-
-    if any_matched_confirm {
-        return AcpPermissionDecision::Confirm;
-    }
-
-    if allow_enabled && all_matched_allow && !commands.is_empty() {
-        return AcpPermissionDecision::Allow;
-    }
-
-    match rules.default_mode {
-        ToolPermissionMode::Allow => AcpPermissionDecision::Allow,
-        ToolPermissionMode::Deny => {
-            AcpPermissionDecision::Deny("Blocked by default_mode: deny".into())
-        }
-        ToolPermissionMode::Confirm => AcpPermissionDecision::Confirm,
-    }
-}
-
 #[async_trait::async_trait(?Send)]
 impl acp::Client for ClientDelegate {
     async fn request_permission(
@@ -1267,9 +1173,15 @@ impl acp::Client for ClientDelegate {
 
             if let Some(name) = tool_name {
                 let input_for_matching = arguments.tool_call.fields.title.as_deref().unwrap_or("");
-                let decision = check_acp_tool_permission(name, input_for_matching, settings);
+                let decision = decide_tool_permission(
+                    name,
+                    input_for_matching,
+                    &settings.tool_permissions,
+                    false,
+                    ShellKind::system(),
+                );
                 match decision {
-                    AcpPermissionDecision::Deny(_reason) => {
+                    ToolPermissionDecision::Deny(_reason) => {
                         thread.upsert_tool_call_inner(
                             arguments.tool_call,
                             acp_thread::ToolCallStatus::Rejected,
@@ -1285,7 +1197,7 @@ impl acp::Client for ClientDelegate {
                         }
                         return Ok(async { acp::RequestPermissionOutcome::Cancelled }.boxed());
                     }
-                    AcpPermissionDecision::Allow if !has_own_permission_modes => {
+                    ToolPermissionDecision::Allow if !has_own_permission_modes => {
                         if let Some(allow_once_option) = options.allow_once_option_id() {
                             thread.upsert_tool_call_inner(
                                 arguments.tool_call,
@@ -1326,13 +1238,19 @@ impl acp::Client for ClientDelegate {
         let path_str = arguments.path.to_string_lossy().to_string();
         let decision = cx.update(|cx| {
             let settings = AgentSettings::get_global(cx);
-            check_acp_tool_permission("edit_file", &path_str, settings)
+            decide_tool_permission(
+                "edit_file",
+                &path_str,
+                &settings.tool_permissions,
+                false,
+                ShellKind::system(),
+            )
         });
         match decision {
-            AcpPermissionDecision::Deny(reason) => {
+            ToolPermissionDecision::Deny(reason) => {
                 return Err(anyhow!("{}", reason).into());
             }
-            AcpPermissionDecision::Confirm => {
+            ToolPermissionDecision::Confirm => {
                 return Err(anyhow!(
                     "File write to '{}' requires confirmation. \
                      Use request_permission to prompt the user first, \
@@ -1341,7 +1259,7 @@ impl acp::Client for ClientDelegate {
                 )
                 .into());
             }
-            AcpPermissionDecision::Allow => {}
+            ToolPermissionDecision::Allow => {}
         }
 
         let local_settings_folder = paths::local_settings_folder_name();

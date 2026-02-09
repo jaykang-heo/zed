@@ -25,6 +25,7 @@ regex.workspace = true
 schemars.workspace = true
 serde.workspace = true
 settings.workspace = true
+shell_command_parser.workspace = true
 util.workspace = true
 
 [dev-dependencies]

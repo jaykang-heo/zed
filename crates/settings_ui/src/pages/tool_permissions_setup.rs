@@ -1,5 +1,6 @@
-use agent::{HARDCODED_SECURITY_RULES, ToolPermissionDecision};
-use agent_settings::AgentSettings;
+use agent_settings::{
+    AgentSettings, HARDCODED_SECURITY_RULES, ToolPermissionDecision, decide_tool_permission,
+};
 use gpui::{Focusable, ReadGlobal, ScrollHandle, TextStyleRefinement, point, prelude::*};
 use settings::{Settings as _, SettingsStore, ToolPermissionMode};
 use std::sync::Arc;
@@ -549,7 +550,7 @@ fn evaluate_test_input(tool_id: &str, input: &str, cx: &App) -> ToolPermissionDe
     // not the global override that bypasses all checks.
     // ShellKind is only used for terminal tool's hardcoded security rules;
     // for other tools, the check returns None immediately.
-    ToolPermissionDecision::from_input(
+    decide_tool_permission(
         tool_id,
         input,
         &settings.tool_permissions,
