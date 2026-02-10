@@ -128,10 +128,10 @@ pub async fn run_scoring_impl(example: &mut Example) -> anyhow::Result<()> {
         if let Some(idx) = best_patch_idx {
             let (patch, _) = &expected_patches_with_cursors[idx];
 
-            // Get the selection range from the expected patch (relative to hunk new text).
+            // todo! use multiple selections
             let expected_selection_in_patch = expected_patches_with_cursors
                 .get(idx)
-                .and_then(|(_, selection)| selection.clone());
+                .and_then(|(_, selections)| selections.first().cloned());
 
             // For Teacher prompts, we need to apply the patch to the editable region
             // to find where the hunk matched, then compute the expected selection position

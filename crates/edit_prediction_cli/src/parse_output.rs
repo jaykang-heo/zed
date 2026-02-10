@@ -22,10 +22,11 @@ pub fn run_parse_output(example: &mut Example) -> Result<()> {
         .collect();
 
     for (ix, actual_output, provider) in to_parse {
-        let (actual_patch, actual_cursor) =
+        let (actual_patch, actual_cursors) =
             parse_prediction_output(example, &actual_output, provider)?;
         example.predictions[ix].actual_patch = Some(actual_patch);
-        example.predictions[ix].actual_cursor = actual_cursor;
+        // todo! use multiple selections
+        example.predictions[ix].actual_cursor = actual_cursors.into_iter().next();
     }
 
     Ok(())
@@ -35,7 +36,7 @@ pub fn parse_prediction_output(
     example: &Example,
     actual_output: &str,
     provider: PredictionProvider,
-) -> Result<(String, Option<ActualCursor>)> {
+) -> Result<(String, Vec<ActualCursor>)> {
     match provider {
         PredictionProvider::Teacher(_) | PredictionProvider::TeacherNonBatching(_) => {
             TeacherPrompt::parse(example, actual_output)
@@ -83,7 +84,7 @@ fn parse_zeta2_output(
     example: &Example,
     actual_output: &str,
     format: ZetaFormat,
-) -> Result<(String, Option<ActualCursor>)> {
+) -> Result<(String, Vec<ActualCursor>)> {
     let prompt = &example.prompt.as_ref().context("prompt required")?.input;
     let prompt_inputs = example
         .prompt_inputs
@@ -153,20 +154,21 @@ fn parse_zeta2_output(
         path = example.spec.cursor_path.to_string_lossy(),
     );
 
-    let actual_cursor = cursor_offset.map(|editable_region_cursor_offset| {
-        // Zeta2 format only has cursor position, not selection range.
-        // Pass an empty selection (start == end) to indicate cursor-only.
-        ActualCursor::from_editable_region(
-            &example.spec.cursor_path,
-            editable_region_cursor_offset..editable_region_cursor_offset,
-            &new_text,
-            &prompt_inputs.content,
-            editable_region_offset,
-            editable_region_start_line,
-        )
-    });
+    let actual_cursors: Vec<ActualCursor> = cursor_offset
+        .into_iter()
+        .map(|editable_region_cursor_offset| {
+            ActualCursor::from_editable_region(
+                &example.spec.cursor_path,
+                editable_region_cursor_offset..editable_region_cursor_offset,
+                &new_text,
+                &prompt_inputs.content,
+                editable_region_offset,
+                editable_region_start_line,
+            )
+        })
+        .collect();
 
-    Ok((formatted_diff, actual_cursor))
+    Ok((formatted_diff, actual_cursors))
 }
 
 #[cfg(test)]

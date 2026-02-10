@@ -94,13 +94,14 @@ pub async fn run_format_prompt(
                 related_files: prompt_inputs.related_files.clone().unwrap_or_default(),
             };
             let prompt = format_zeta_prompt(&input, version);
-            let (expected_patch, expected_selection) = example
+            let (expected_patch, expected_selections) = example
                 .spec
                 .expected_patches_with_selections()
                 .into_iter()
                 .next()
                 .context("expected patches is empty")?;
-            let expected_cursor_offset = expected_selection.map(|s| s.end);
+            // todo! use multiple selections
+            let expected_cursor_offset = expected_selections.first().map(|s| s.end);
             let expected_output =
                 zeta2_output_for_patch(&input, &expected_patch, expected_cursor_offset, version)?;
             let rejected_output = example
@@ -198,39 +199,19 @@ impl TeacherPrompt {
         prompt
     }
 
-    pub fn parse(example: &Example, response: &str) -> Result<(String, Option<ActualCursor>)> {
+    pub fn parse(example: &Example, response: &str) -> Result<(String, Vec<ActualCursor>)> {
         // Extract updated (new) editable region from the model response.
         // The model may include editable region markers in its output, so we need to strip them.
         let new_editable_region = extract_last_codeblock(response);
 
         // Check if the model indicated no edits are needed
         if new_editable_region.trim() == Self::NO_EDITS {
-            return Ok((String::new(), None));
+            return Ok((String::new(), Vec::new()));
         }
 
         let new_editable_region = Self::extract_editable_region(&new_editable_region)?;
 
-        // Extract selection range from markers.
-        // The cursor (head of selection) is at USER_CURSOR_MARKER.
-        // If SELECTION_START_MARKER is present, it marks the start of a non-empty selection.
-        let selection_start_offset = new_editable_region.find(Self::SELECTION_START_MARKER);
-        let cursor_marker_offset = new_editable_region.find(Self::USER_CURSOR_MARKER);
-
-        // Remove markers and compute final offsets.
-        // We need to account for marker removal when computing positions.
-        let selection_range = match (selection_start_offset, cursor_marker_offset) {
-            (Some(mut sel_start), Some(mut cursor_pos)) => {
-                if cursor_pos > sel_start {
-                    cursor_pos -= Self::SELECTION_START_MARKER.len()
-                } else {
-                    std::mem::swap(&mut sel_start, &mut cursor_pos);
-                    cursor_pos -= Self::USER_CURSOR_MARKER.len();
-                }
-                Some(sel_start..cursor_pos)
-            }
-            (None, Some(cursor_pos)) => Some(cursor_pos..cursor_pos),
-            _ => None,
-        };
+        let selection_ranges = Self::extract_selections(&new_editable_region);
 
         let mut new_editable_region = new_editable_region
             .replace(Self::SELECTION_START_MARKER, "")
@@ -285,18 +266,95 @@ impl TeacherPrompt {
             diff = diff,
         };
 
-        let actual_cursor = selection_range.map(|range| {
-            ActualCursor::from_editable_region(
-                &example.spec.cursor_path,
-                range,
-                &new_editable_region,
-                &prompt_inputs.content,
-                editable_region_offset,
-                editable_region_start_line,
-            )
-        });
+        let actual_cursors = selection_ranges
+            .into_iter()
+            .map(|range| {
+                ActualCursor::from_editable_region(
+                    &example.spec.cursor_path,
+                    range,
+                    &new_editable_region,
+                    &prompt_inputs.content,
+                    editable_region_offset,
+                    editable_region_start_line,
+                )
+            })
+            .collect();
 
-        Ok((diff, actual_cursor))
+        Ok((diff, actual_cursors))
+    }
+
+    /// Extract all selection/cursor ranges from an editable region that still
+    /// contains `SELECTION_START_MARKER` and `USER_CURSOR_MARKER` markers.
+    ///
+    /// Returns byte-offset ranges in the *marker-stripped* text. Each range
+    /// represents one selection: `start..end` where `start == end` means an
+    /// empty cursor and `start < end` means selected text.
+    fn extract_selections(text_with_markers: &str) -> Vec<Range<usize>> {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Kind {
+            SelectionStart,
+            UserCursor,
+        }
+
+        let sel_marker = Self::SELECTION_START_MARKER;
+        let cur_marker = Self::USER_CURSOR_MARKER;
+
+        // Collect every marker occurrence in document order.
+        let mut markers: Vec<(usize, Kind)> = Vec::new();
+        let mut pos = 0;
+        while pos < text_with_markers.len() {
+            if text_with_markers[pos..].starts_with(sel_marker) {
+                markers.push((pos, Kind::SelectionStart));
+                pos += sel_marker.len();
+            } else if text_with_markers[pos..].starts_with(cur_marker) {
+                markers.push((pos, Kind::UserCursor));
+                pos += cur_marker.len();
+            } else {
+                pos += 1;
+            }
+        }
+
+        // Compute the clean (marker-stripped) offset for each marker.
+        let mut clean_offsets = Vec::with_capacity(markers.len());
+        let mut removed_bytes = 0usize;
+        for &(raw_pos, kind) in &markers {
+            clean_offsets.push(raw_pos - removed_bytes);
+            removed_bytes += match kind {
+                Kind::SelectionStart => sel_marker.len(),
+                Kind::UserCursor => cur_marker.len(),
+            };
+        }
+
+        // Pair markers into selection ranges.
+        let mut selections = Vec::new();
+        let mut i = 0;
+        while i < markers.len() {
+            match markers[i].1 {
+                Kind::SelectionStart => {
+                    if i + 1 < markers.len() && markers[i + 1].1 == Kind::UserCursor {
+                        selections.push(clean_offsets[i]..clean_offsets[i + 1]);
+                        i += 2;
+                    } else {
+                        // Orphaned selection_start – skip it.
+                        i += 1;
+                    }
+                }
+                Kind::UserCursor => {
+                    if i + 1 < markers.len() && markers[i + 1].1 == Kind::SelectionStart {
+                        // Backwards pair: UserCursor then SelectionStart.
+                        // clean_offsets are in document order so this still
+                        // produces a valid forward range.
+                        selections.push(clean_offsets[i]..clean_offsets[i + 1]);
+                        i += 2;
+                    } else {
+                        selections.push(clean_offsets[i]..clean_offsets[i]);
+                        i += 1;
+                    }
+                }
+            }
+        }
+
+        selections
     }
 
     fn format_edit_history(edit_history: &str) -> String {
@@ -807,7 +865,7 @@ mod tests {
                 result.err()
             );
 
-            let (diff, actual_cursor) = result.unwrap();
+            let (diff, actual_cursors) = result.unwrap();
 
             // Handle NO_EDITS case specially.
             if test_case.expected_new_region.is_empty() {
@@ -817,8 +875,8 @@ mod tests {
                     test_case.name
                 );
                 assert!(
-                    actual_cursor.is_none(),
-                    "Test '{}': expected no cursor for NO_EDITS",
+                    actual_cursors.is_empty(),
+                    "Test '{}': expected no cursors for NO_EDITS",
                     test_case.name
                 );
                 continue;
@@ -835,7 +893,8 @@ mod tests {
                     });
 
             // Insert cursor/selection markers into the actual text.
-            let actual_with_markers = if let Some(cursor) = &actual_cursor {
+            // todo! use multiple selections
+            let actual_with_markers = if let Some(cursor) = actual_cursors.first() {
                 let selection = cursor.editable_region_selection().unwrap_or(0..0);
                 util::test::generate_marked_text(
                     &actual_text,
@@ -853,5 +912,72 @@ mod tests {
                 test_case.name
             );
         }
+    }
+
+    #[test]
+    fn test_parse_teacher_output_multiple_selections() {
+        let file_content = indoc::indoc! {"
+            fn process(data: &DataSet) -> Vec<String> {
+                let mut results = Vec::new();
+                for
+            }
+        "};
+        let prompt_editable_region = indoc::indoc! {"
+            fn process(data: &DataSet) -> Vec<String> {
+                let mut results = Vec::new();
+                forˇ
+            }
+        "};
+        let response = indoc::indoc! {"
+            Completing the for loop.
+
+            `````
+            <|editable_region_start|>
+            fn process(data: &DataSet) -> Vec<String> {
+                let mut results = Vec::new();
+                for <|selection_start|>item<|user_cursor|> in <|selection_start|>data.items()<|user_cursor|> {
+                    <|user_cursor|>
+                }
+            }
+            <|editable_region_end|>
+            `````
+        "};
+
+        let example = make_example(file_content, prompt_editable_region);
+        let (_, actual_cursors) = TeacherPrompt::parse(&example, response).unwrap();
+
+        assert_eq!(
+            actual_cursors.len(),
+            3,
+            "Expected 3 cursors (two selections + one empty cursor in body)"
+        );
+
+        // First: selection over "item"
+        let first = &actual_cursors[0];
+        let first_sel = first.editable_region_selection().unwrap();
+        assert_ne!(
+            first_sel.start, first_sel.end,
+            "first cursor should be a non-empty selection"
+        );
+
+        // Second: selection over "data.items()"
+        let second = &actual_cursors[1];
+        let second_sel = second.editable_region_selection().unwrap();
+        assert_ne!(
+            second_sel.start, second_sel.end,
+            "second cursor should be a non-empty selection"
+        );
+
+        // Third: empty cursor in the loop body
+        let third = &actual_cursors[2];
+        let third_sel = third.editable_region_selection().unwrap();
+        assert_eq!(
+            third_sel.start, third_sel.end,
+            "third cursor should be an empty selection"
+        );
+
+        // Verify the selections don't overlap and are in order
+        assert!(first_sel.end <= second_sel.start);
+        assert!(second_sel.end <= third_sel.start);
     }
 }

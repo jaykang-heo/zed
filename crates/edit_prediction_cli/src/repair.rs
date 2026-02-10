@@ -237,7 +237,7 @@ pub fn needs_repair(example: &Example, confidence_threshold: u8) -> bool {
 ///
 /// Handles the `KEEP_PREVIOUS` sentinel by copying the teacher's prediction,
 /// and delegates normal output to `TeacherPrompt::parse`.
-pub fn parse(example: &Example, actual_output: &str) -> Result<(String, Option<ActualCursor>)> {
+pub fn parse(example: &Example, actual_output: &str) -> Result<(String, Vec<ActualCursor>)> {
     let last_codeblock = extract_last_codeblock(actual_output);
     if last_codeblock.trim() == KEEP_PREVIOUS {
         let original = example
@@ -245,8 +245,8 @@ pub fn parse(example: &Example, actual_output: &str) -> Result<(String, Option<A
             .first()
             .context("no original prediction to keep")?;
         let patch = original.actual_patch.clone().unwrap_or_default();
-        let cursor = original.actual_cursor.clone();
-        return Ok((patch, cursor));
+        let cursors: Vec<ActualCursor> = original.actual_cursor.clone().into_iter().collect();
+        return Ok((patch, cursors));
     }
 
     TeacherPrompt::parse(example, actual_output)
@@ -379,8 +379,9 @@ pub async fn run_repair(
         .err()
         .map(|e| format!("Failed to parse repair response: {}", e));
 
-    let (actual_patch, actual_cursor) = parse_result.ok().unzip();
-    let actual_cursor = actual_cursor.flatten();
+    let (actual_patch, actual_cursors) = parse_result.ok().unzip();
+    // todo! use multiple selections
+    let actual_cursor = actual_cursors.and_then(|cursors| cursors.into_iter().next());
 
     example.predictions.push(ExamplePrediction {
         actual_patch,

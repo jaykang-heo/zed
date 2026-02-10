@@ -7,6 +7,7 @@ use telemetry_events::EditPredictionRating;
 pub const CURSOR_POSITION_MARKER: &str = "[CURSOR_POSITION]";
 pub const SELECTION_MARKER: &str = "[SELECTION]";
 pub const INLINE_CURSOR_MARKER: &str = "<|user_cursor|>";
+pub const INLINE_SELECTION_START_MARKER: &str = "<|selection_start|>";
 
 /// Maximum cursor file size to capture (64KB).
 /// Files larger than this will not have their content captured,
@@ -390,14 +391,16 @@ impl ExampleSpec {
     /// Returns the cursor excerpt and selection range.
     ///
     /// For backwards compatibility, this also supports returning a cursor position (empty selection).
-    pub fn cursor_excerpt_with_selection(&self) -> Result<(String, Range<usize>)> {
+    pub fn cursor_excerpt_with_selection(&self) -> Result<(String, Vec<Range<usize>>)> {
         let input = &self.cursor_position;
 
-        // Check for inline cursor marker first
-        if let Some(inline_offset) = input.find(INLINE_CURSOR_MARKER) {
-            let excerpt = input[..inline_offset].to_string()
-                + &input[inline_offset + INLINE_CURSOR_MARKER.len()..];
-            return Ok((excerpt, inline_offset..inline_offset));
+        // Check for inline cursor markers first
+        if input.contains(INLINE_CURSOR_MARKER) {
+            let selections = extract_inline_selections(input);
+            let excerpt = input
+                .replace(INLINE_SELECTION_START_MARKER, "")
+                .replace(INLINE_CURSOR_MARKER, "");
+            return Ok((excerpt, selections));
         }
 
         let marker_offset = input
@@ -458,7 +461,7 @@ impl ExampleSpec {
         let cursor_offset = cursor_line_start + cursor_column;
         let selection_start_offset = cursor_line_start + selection_start_column;
 
-        Ok((excerpt, selection_start_offset..cursor_offset))
+        Ok((excerpt, vec![selection_start_offset..cursor_offset]))
     }
 
     /// Sets the cursor position excerpt from a plain excerpt and selection range.
@@ -471,9 +474,15 @@ impl ExampleSpec {
     pub fn set_cursor_excerpt_with_selection(
         &mut self,
         excerpt: &str,
-        selection: Range<usize>,
+        selections: &[Range<usize>],
         line_comment_prefix: &str,
     ) {
+        if selections.len() != 1 {
+            self.cursor_position = embed_inline_selections(excerpt, selections);
+            return;
+        }
+
+        let selection = &selections[0];
         let cursor_offset = selection.end;
         let selection_start = selection.start;
         let is_empty_selection = selection.start == selection.end;
@@ -568,12 +577,12 @@ impl ExampleSpec {
     /// #       ------^[SELECTION]
     /// ```
     /// This indicates "module" is selected with the cursor at the end.
-    pub fn expected_patches_with_selections(&self) -> Vec<(String, Option<Range<usize>>)> {
+    pub fn expected_patches_with_selections(&self) -> Vec<(String, Vec<Range<usize>>)> {
         self.expected_patches
             .iter()
             .map(|patch| {
                 let mut clean_patch = String::new();
-                let mut selection: Option<Range<usize>> = None;
+                let mut selections: Vec<Range<usize>> = Vec::new();
                 let mut line_start_offset = 0usize;
                 let mut prev_line_start_offset = 0usize;
 
@@ -606,7 +615,7 @@ impl ExampleSpec {
                             let cursor_offset = prev_line_start_offset + cursor_column;
 
                             let selection_start = cursor_offset - dashes_before;
-                            selection = Some(selection_start..cursor_offset);
+                            selections.push(selection_start..cursor_offset);
                         }
                         _ => {
                             if !clean_patch.is_empty() {
@@ -629,21 +638,21 @@ impl ExampleSpec {
                     clean_patch.push('\n');
                 }
 
-                (clean_patch, selection)
+                (clean_patch, selections)
             })
             .collect()
     }
 
     pub fn set_expected_patches_with_selections(
         &mut self,
-        patches: Vec<(String, Option<Range<usize>>)>,
+        patches: Vec<(String, Vec<Range<usize>>)>,
     ) {
         self.expected_patches = patches
             .into_iter()
-            .map(|(patch, selection)| {
-                let Some(selection) = selection else {
+            .map(|(patch, selections)| {
+                if selections.is_empty() {
                     return patch;
-                };
+                }
 
                 let mut result = String::new();
                 let mut line_start_offset = 0usize;
@@ -658,33 +667,33 @@ impl ExampleSpec {
                         DiffLine::Addition(content) => {
                             let line_end_offset = line_start_offset + content.len();
 
-                            // Check if the selection head (end) falls within this line.
-                            let cursor_offset = selection.end;
-                            if cursor_offset >= line_start_offset
-                                && cursor_offset <= line_end_offset
-                            {
-                                let cursor_column = cursor_offset - line_start_offset;
-                                let selection_start_column =
-                                    selection.start.saturating_sub(line_start_offset);
-                                let is_empty_selection = selection.start == selection.end;
+                            for selection in &selections {
+                                let cursor_offset = selection.end;
+                                if cursor_offset >= line_start_offset
+                                    && cursor_offset <= line_end_offset
+                                {
+                                    let cursor_column = cursor_offset - line_start_offset;
+                                    let selection_start_column =
+                                        selection.start.saturating_sub(line_start_offset);
+                                    let is_empty_selection = selection.start == selection.end;
 
-                                result.push('\n');
-                                result.push('#');
+                                    result.push('\n');
+                                    result.push('#');
 
-                                // Write dashes for selection before cursor.
-                                for i in 0..cursor_column {
-                                    if i >= selection_start_column && !is_empty_selection {
-                                        result.push('-');
-                                    } else {
-                                        result.push(' ');
+                                    for i in 0..cursor_column {
+                                        if i >= selection_start_column && !is_empty_selection {
+                                            result.push('-');
+                                        } else {
+                                            result.push(' ');
+                                        }
                                     }
-                                }
 
-                                result.push('^');
-                                if is_empty_selection {
-                                    write!(result, "{}", CURSOR_POSITION_MARKER).unwrap();
-                                } else {
-                                    write!(result, "{}", SELECTION_MARKER).unwrap();
+                                    result.push('^');
+                                    if is_empty_selection {
+                                        write!(result, "{}", CURSOR_POSITION_MARKER).unwrap();
+                                    } else {
+                                        write!(result, "{}", SELECTION_MARKER).unwrap();
+                                    }
                                 }
                             }
 
@@ -705,6 +714,96 @@ impl ExampleSpec {
             })
             .collect();
     }
+}
+
+/// Extract all selection/cursor ranges from text containing inline
+/// `<|selection_start|>` and `<|user_cursor|>` markers.
+///
+/// Returns byte-offset ranges in the marker-stripped text. Each range
+/// is `start..end` where `start == end` means an empty cursor.
+fn extract_inline_selections(text: &str) -> Vec<Range<usize>> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Kind {
+        SelectionStart,
+        UserCursor,
+    }
+
+    let sel_marker = INLINE_SELECTION_START_MARKER;
+    let cur_marker = INLINE_CURSOR_MARKER;
+
+    let mut markers: Vec<(usize, Kind)> = Vec::new();
+    let mut pos = 0;
+    while pos < text.len() {
+        if text[pos..].starts_with(sel_marker) {
+            markers.push((pos, Kind::SelectionStart));
+            pos += sel_marker.len();
+        } else if text[pos..].starts_with(cur_marker) {
+            markers.push((pos, Kind::UserCursor));
+            pos += cur_marker.len();
+        } else {
+            pos += 1;
+        }
+    }
+
+    let mut clean_offsets = Vec::with_capacity(markers.len());
+    let mut removed_bytes = 0usize;
+    for &(raw_pos, kind) in &markers {
+        clean_offsets.push(raw_pos - removed_bytes);
+        removed_bytes += match kind {
+            Kind::SelectionStart => sel_marker.len(),
+            Kind::UserCursor => cur_marker.len(),
+        };
+    }
+
+    let mut selections = Vec::new();
+    let mut i = 0;
+    while i < markers.len() {
+        match markers[i].1 {
+            Kind::SelectionStart => {
+                if i + 1 < markers.len() && markers[i + 1].1 == Kind::UserCursor {
+                    selections.push(clean_offsets[i]..clean_offsets[i + 1]);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            Kind::UserCursor => {
+                if i + 1 < markers.len() && markers[i + 1].1 == Kind::SelectionStart {
+                    selections.push(clean_offsets[i]..clean_offsets[i + 1]);
+                    i += 2;
+                } else {
+                    selections.push(clean_offsets[i]..clean_offsets[i]);
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    selections
+}
+
+/// Embed inline `<|selection_start|>` and `<|user_cursor|>` markers into
+/// an excerpt for the given selection ranges.
+fn embed_inline_selections(excerpt: &str, selections: &[Range<usize>]) -> String {
+    // Collect insertion points sorted in reverse order so earlier insertions
+    // don't shift later offsets.
+    let mut insertions: Vec<(usize, &str)> = Vec::new();
+    for selection in selections {
+        if selection.start == selection.end {
+            insertions.push((selection.start, INLINE_CURSOR_MARKER));
+        } else {
+            insertions.push((selection.end, INLINE_CURSOR_MARKER));
+            insertions.push((selection.start, INLINE_SELECTION_START_MARKER));
+        }
+    }
+    insertions.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let mut result = excerpt.to_string();
+    for (offset, marker) in insertions {
+        let clamped = offset.min(result.len());
+        result.insert_str(clamped, marker);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -749,11 +848,11 @@ mod tests {
         }
         .to_string();
 
-        spec.set_cursor_excerpt_with_selection(excerpt, offset..offset, "//");
+        spec.set_cursor_excerpt_with_selection(excerpt, &[offset..offset], "//");
         assert_eq!(spec.cursor_position, position_string);
         assert_eq!(
             spec.cursor_excerpt_with_selection().unwrap(),
-            (excerpt.to_string(), offset..offset)
+            (excerpt.to_string(), vec![offset..offset])
         );
 
         // Cursor after `l` in `let`
@@ -767,11 +866,11 @@ mod tests {
         }
         .to_string();
 
-        spec.set_cursor_excerpt_with_selection(excerpt, offset..offset, "//");
+        spec.set_cursor_excerpt_with_selection(excerpt, &[offset..offset], "//");
         assert_eq!(spec.cursor_position, position_string);
         assert_eq!(
             spec.cursor_excerpt_with_selection().unwrap(),
-            (excerpt.to_string(), offset..offset)
+            (excerpt.to_string(), vec![offset..offset])
         );
 
         // Cursor before `let`
@@ -785,11 +884,11 @@ mod tests {
         }
         .to_string();
 
-        spec.set_cursor_excerpt_with_selection(excerpt, offset..offset, "//");
+        spec.set_cursor_excerpt_with_selection(excerpt, &[offset..offset], "//");
         assert_eq!(spec.cursor_position, position_string);
         assert_eq!(
             spec.cursor_excerpt_with_selection().unwrap(),
-            (excerpt.to_string(), offset..offset)
+            (excerpt.to_string(), vec![offset..offset])
         );
 
         // Cursor at beginning of the line with `let`
@@ -803,11 +902,11 @@ mod tests {
         }
         .to_string();
 
-        spec.set_cursor_excerpt_with_selection(excerpt, offset..offset, "//");
+        spec.set_cursor_excerpt_with_selection(excerpt, &[offset..offset], "//");
         assert_eq!(spec.cursor_position, position_string);
         assert_eq!(
             spec.cursor_excerpt_with_selection().unwrap(),
-            (excerpt.to_string(), offset..offset)
+            (excerpt.to_string(), vec![offset..offset])
         );
 
         // Cursor at end of line, after the semicolon
@@ -821,11 +920,11 @@ mod tests {
         }
         .to_string();
 
-        spec.set_cursor_excerpt_with_selection(excerpt, offset..offset, "//");
+        spec.set_cursor_excerpt_with_selection(excerpt, &[offset..offset], "//");
         assert_eq!(spec.cursor_position, position_string);
         assert_eq!(
             spec.cursor_excerpt_with_selection().unwrap(),
-            (excerpt.to_string(), offset..offset)
+            (excerpt.to_string(), vec![offset..offset])
         );
 
         // Caret at end of file (no trailing newline)
@@ -841,11 +940,11 @@ mod tests {
         }
         .to_string();
 
-        spec.set_cursor_excerpt_with_selection(excerpt, offset..offset, "//");
+        spec.set_cursor_excerpt_with_selection(excerpt, &[offset..offset], "//");
         assert_eq!(spec.cursor_position, position_string);
         assert_eq!(
             spec.cursor_excerpt_with_selection().unwrap(),
-            (excerpt.to_string(), offset..offset)
+            (excerpt.to_string(), vec![offset..offset])
         );
     }
 
@@ -890,7 +989,7 @@ mod tests {
             spec.cursor_excerpt_with_selection().unwrap(),
             (
                 expected_excerpt.to_string(),
-                expected_offset..expected_offset
+                vec![expected_offset..expected_offset]
             )
         );
 
@@ -913,7 +1012,7 @@ mod tests {
             spec.cursor_excerpt_with_selection().unwrap(),
             (
                 expected_excerpt.to_string(),
-                expected_offset..expected_offset
+                vec![expected_offset..expected_offset]
             )
         );
 
@@ -926,7 +1025,7 @@ mod tests {
             spec.cursor_excerpt_with_selection().unwrap(),
             (
                 expected_excerpt.to_string(),
-                expected_offset..expected_offset
+                vec![expected_offset..expected_offset]
             )
         );
     }
@@ -990,21 +1089,21 @@ mod tests {
 
         spec.set_expected_patches_with_selections(vec![(
             clean_patch.clone(),
-            Some(cursor_offset..cursor_offset),
+            vec![cursor_offset..cursor_offset],
         )]);
         assert_eq!(spec.expected_patches, vec![encoded_patch]);
 
         let results = spec.expected_patches_with_selections();
         assert_eq!(
             results,
-            vec![(clean_patch.clone(), Some(cursor_offset..cursor_offset))]
+            vec![(clean_patch.clone(), vec![cursor_offset..cursor_offset])]
         );
 
-        spec.set_expected_patches_with_selections(vec![(clean_patch.clone(), None)]);
+        spec.set_expected_patches_with_selections(vec![(clean_patch.clone(), vec![])]);
         assert_eq!(spec.expected_patches, vec![clean_patch.clone()]);
 
         let results = spec.expected_patches_with_selections();
-        assert_eq!(results, vec![(clean_patch, None)]);
+        assert_eq!(results, vec![(clean_patch, vec![])]);
     }
 
     #[test]
@@ -1076,14 +1175,14 @@ mod tests {
 
         spec.set_expected_patches_with_selections(vec![(
             clean_patch.clone(),
-            Some(selection_start..selection_end),
+            vec![selection_start..selection_end],
         )]);
         assert_eq!(spec.expected_patches, vec![encoded_patch]);
 
         let results = spec.expected_patches_with_selections();
         assert_eq!(
             results,
-            vec![(clean_patch, Some(selection_start..selection_end))]
+            vec![(clean_patch, vec![selection_start..selection_end])]
         );
     }
 
@@ -1122,11 +1221,11 @@ mod tests {
         }
         .to_string();
 
-        spec.set_cursor_excerpt_with_selection(excerpt, selection_start..selection_end, "#");
+        spec.set_cursor_excerpt_with_selection(excerpt, &[selection_start..selection_end], "#");
         assert_eq!(spec.cursor_position, position_string);
         assert_eq!(
             spec.cursor_excerpt_with_selection().unwrap(),
-            (excerpt.to_string(), selection_start..selection_end)
+            (excerpt.to_string(), vec![selection_start..selection_end])
         );
 
         // Test selection starting at column 0.
@@ -1144,11 +1243,11 @@ mod tests {
         }
         .to_string();
 
-        spec.set_cursor_excerpt_with_selection(excerpt, selection_start..selection_end, "#");
+        spec.set_cursor_excerpt_with_selection(excerpt, &[selection_start..selection_end], "#");
         assert_eq!(spec.cursor_position, position_string);
         assert_eq!(
             spec.cursor_excerpt_with_selection().unwrap(),
-            (excerpt.to_string(), selection_start..selection_end)
+            (excerpt.to_string(), vec![selection_start..selection_end])
         );
     }
 }

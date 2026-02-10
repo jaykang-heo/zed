@@ -13,6 +13,7 @@ pub async fn run_distill(example: &mut Example) -> Result<()> {
         example.predictions.iter().collect()
     };
 
+    // todo! use multiple selections
     let expected_patches = predictions
         .into_iter()
         .filter_map(|p| {
@@ -20,7 +21,9 @@ pub async fn run_distill(example: &mut Example) -> Result<()> {
                 p.actual_patch.clone()?,
                 p.actual_cursor
                     .as_ref()
-                    .and_then(|c| c.editable_region_selection()),
+                    .and_then(|c| c.editable_region_selection())
+                    .into_iter()
+                    .collect(),
             ))
         })
         .collect();
