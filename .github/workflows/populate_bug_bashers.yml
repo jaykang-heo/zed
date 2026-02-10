@@ -18,13 +18,8 @@ jobs:
             const projectNumber = 74;
             const targetColumnName = 'Bug Bashers';
 
-            // Calculate date 30 days ago
-            const thirtyDaysAgo = new Date();
-            thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-            const dateFilter = thirtyDaysAgo.toISOString().split('T')[0];
-
-            // Search for open issues with state:reproducible created in last 30 days
-            const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} is:issue is:open label:state:reproducible created:>=${dateFilter}`;
+            // Search for ALL open issues with state:reproducible (no date filter)
+            const searchQuery = `repo:${context.repo.owner}/${context.repo.repo} is:issue is:open label:state:reproducible`;
 
             console.log(`Searching with query: ${searchQuery}`);
 
@@ -51,13 +46,18 @@ jobs:
                 return false;
               }
 
-              // Must have frequency:always, frequency:common, or a label containing ".contrib"
-              const hasRequiredFrequency = labels.includes('frequency:always') ||
-                                           labels.includes('frequency:common') ||
-                                           labels.some(label => label.includes('.contrib'));
+              // Has .contrib label (any age)
+              const hasContribLabel = labels.some(label => label.includes('.contrib'));
 
-              if (!hasRequiredFrequency) {
-                console.log(`Excluding ${issue.number}: missing required frequency/contrib label`);
+              // OR created in last 30 days with frequency:always or frequency:common
+              const thirtyDaysAgo = new Date();
+              thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+              const createdAt = new Date(issue.created_at);
+              const isRecent = createdAt >= thirtyDaysAgo;
+              const hasFrequencyLabel = labels.includes('frequency:always') || labels.includes('frequency:common');
+
+              if (!hasContribLabel && !(isRecent && hasFrequencyLabel)) {
+                console.log(`Excluding ${issue.number}: missing required criteria`);
                 return false;
               }
 
@@ -65,6 +65,12 @@ jobs:
             });
 
             console.log(`${filteredIssues.length} issues match all criteria`);
+
+            // Cap at 30 issues (newest first)
+            filteredIssues.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            const issuesToAdd = filteredIssues.slice(0, 30);
+
+            console.log(`Adding ${issuesToAdd.length} issues to project`);
 
             // Get the project ID using GraphQL
             const projectQuery = `
@@ -102,7 +108,7 @@ jobs:
             console.log(`Project ID: ${projectId}, Target column: ${targetOption.id}`);
 
             // Add each issue to the project
-            for (const issue of filteredIssues) {
+            for (const issue of issuesToAdd) {
               try {
                 // Add item to project
                 const addMutation = `
