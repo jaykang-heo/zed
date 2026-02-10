@@ -1895,14 +1895,7 @@ impl Panel for AgentPanel {
             DockPosition::Left | DockPosition::Right => self.width = size,
             DockPosition::Bottom => self.height = size,
         }
-        let this = cx.weak_entity();
-        cx.defer(move |cx| {
-            if let Some(this) = this.upgrade() {
-                this.update(cx, |this, cx| {
-                    this.serialize(cx);
-                });
-            }
-        });
+        self.serialize(cx);
         cx.notify();
     }
 
