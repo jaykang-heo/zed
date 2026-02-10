@@ -3,7 +3,7 @@ use crate::{
     DummyKeyboardMapper, ForegroundExecutor, Keymap, NoopTextSystem, Platform, PlatformDisplay,
     PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem, PromptButton,
     ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream, SourceMetadata, Task,
-    TestDisplay, TestPlatformWindow, WindowAppearance, WindowParams, size,
+    TestDisplay, TestPlatformWindow, ThermalState, WindowAppearance, WindowParams, size,
 };
 use anyhow::Result;
 use collections::VecDeque;
@@ -245,6 +245,12 @@ impl Platform for TestPlatform {
     }
 
     fn on_keyboard_layout_change(&self, _: Box<dyn FnMut()>) {}
+
+    fn on_thermal_state_change(&self, _: Box<dyn FnMut()>) {}
+
+    fn thermal_state(&self) -> ThermalState {
+        ThermalState::Nominal
+    }
 
     fn run(&self, _on_finish_launching: Box<dyn FnOnce()>) {
         unimplemented!()

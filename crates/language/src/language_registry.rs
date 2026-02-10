@@ -552,15 +552,16 @@ impl LanguageRegistry {
     }
 
     /// Adds paths to WASM grammar files, which can be loaded if needed.
-    pub fn register_wasm_grammars(
-        &self,
-        grammars: impl IntoIterator<Item = (impl Into<Arc<str>>, PathBuf)>,
-    ) {
+    pub fn register_wasm_grammars(&self, grammars: Vec<(Arc<str>, PathBuf)>) {
+        if grammars.is_empty() {
+            return;
+        }
+
         let mut state = self.state.write();
         state.grammars.extend(
             grammars
                 .into_iter()
-                .map(|(name, path)| (name.into(), AvailableGrammar::Unloaded(path))),
+                .map(|(name, path)| (name, AvailableGrammar::Unloaded(path))),
         );
         state.version += 1;
         state.reload_count += 1;
@@ -922,6 +923,7 @@ impl LanguageRegistry {
         available_language
     }
 
+    #[ztracing::instrument(skip_all)]
     pub fn load_language(
         self: &Arc<Self>,
         language: &AvailableLanguage,
@@ -1009,6 +1011,7 @@ impl LanguageRegistry {
         rx
     }
 
+    #[ztracing::instrument(skip_all)]
     fn get_or_load_language(
         self: &Arc<Self>,
         callback: impl Fn(
@@ -1030,6 +1033,8 @@ impl LanguageRegistry {
         self: &Arc<Self>,
         name: Arc<str>,
     ) -> impl Future<Output = Result<tree_sitter::Language>> {
+        let span = ztracing::debug_span!("get_or_load_grammar", name = &*name.clone());
+        let _enter = span.enter();
         let (tx, rx) = oneshot::channel();
         let mut state = self.state.write();
 

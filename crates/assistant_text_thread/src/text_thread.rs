@@ -4,7 +4,6 @@ use assistant_slash_command::{
     SlashCommandContent, SlashCommandEvent, SlashCommandLine, SlashCommandOutputSection,
     SlashCommandResult, SlashCommandWorkingSet,
 };
-use assistant_slash_commands::FileCommandMetadata;
 use client::{self, proto};
 use clock::ReplicaId;
 use cloud_llm_client::CompletionIntent;
@@ -29,7 +28,6 @@ use open_ai::Model as OpenAiModel;
 use paths::text_threads_dir;
 use prompt_store::PromptBuilder;
 use serde::{Deserialize, Serialize};
-use settings::Settings;
 use smallvec::SmallVec;
 use std::{
     cmp::{Ordering, max},
@@ -688,7 +686,6 @@ pub struct TextThread {
     _subscriptions: Vec<Subscription>,
     language_registry: Arc<LanguageRegistry>,
     prompt_builder: Arc<PromptBuilder>,
-    completion_mode: agent_settings::CompletionMode,
 }
 
 trait ContextAnnotation {
@@ -719,14 +716,6 @@ impl TextThread {
             slash_commands,
             cx,
         )
-    }
-
-    pub fn completion_mode(&self) -> agent_settings::CompletionMode {
-        self.completion_mode
-    }
-
-    pub fn set_completion_mode(&mut self, completion_mode: agent_settings::CompletionMode) {
-        self.completion_mode = completion_mode;
     }
 
     pub fn new(
@@ -773,7 +762,6 @@ impl TextThread {
             pending_cache_warming_task: Task::ready(None),
             _subscriptions: vec![cx.subscribe(&buffer, Self::handle_buffer_event)],
             pending_save: Task::ready(Ok(())),
-            completion_mode: AgentSettings::get_global(cx).preferred_completion_mode,
             path: None,
             buffer,
             language_registry,
@@ -1187,6 +1175,11 @@ impl TextThread {
     }
 
     pub fn contains_files(&self, cx: &App) -> bool {
+        // Mimics assistant_slash_commands::FileCommandMetadata.
+        #[derive(Serialize, Deserialize)]
+        pub struct FileCommandMetadata {
+            pub path: String,
+        }
         let buffer = self.buffer.read(cx);
         self.slash_command_output_sections.iter().any(|section| {
             section.is_valid(buffer)
@@ -2274,13 +2267,13 @@ impl TextThread {
             thread_id: None,
             prompt_id: None,
             intent: Some(CompletionIntent::UserPrompt),
-            mode: None,
             messages: Vec::new(),
             tools: Vec::new(),
             tool_choice: None,
             stop: Vec::new(),
             temperature: model.and_then(|model| AgentSettings::temperature_for_model(model, cx)),
             thinking_allowed: true,
+            thinking_effort: None,
         };
         for message in self.messages(cx) {
             if message.status != MessageStatus::Done {
@@ -2333,15 +2326,7 @@ impl TextThread {
                 completion_request.messages.push(request_message);
             }
         }
-        let supports_burn_mode = if let Some(model) = model {
-            model.supports_burn_mode()
-        } else {
-            false
-        };
 
-        if supports_burn_mode {
-            completion_request.mode = Some(self.completion_mode.into());
-        }
         completion_request
     }
 
