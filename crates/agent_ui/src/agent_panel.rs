@@ -67,6 +67,7 @@ use ui::{
 use util::ResultExt as _;
 use workspace::{
     CollaboratorId, DraggedSelection, DraggedTab, ToggleZoom, ToolbarItemView, Workspace,
+    WorkspaceId,
     dock::{DockPosition, Panel, PanelEvent},
 };
 use zed_actions::{
@@ -168,10 +169,8 @@ pub fn init(cx: &mut App) {
                 .register_action(|workspace, _: &NewTextThread, window, cx| {
                     if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
                         workspace.focus_panel::<AgentPanel>(window, cx);
-                        panel.update(cx, |_, cx| {
-                            cx.defer_in(window, |panel, window, cx| {
-                                panel.new_text_thread(window, cx);
-                            });
+                        panel.update(cx, |panel, cx| {
+                            panel.new_text_thread(window, cx);
                         });
                     }
                 })
@@ -457,6 +456,8 @@ impl ActiveView {
 
 pub struct AgentPanel {
     workspace: WeakEntity<Workspace>,
+    /// Workspace id is used as a database key
+    workspace_id: Option<WorkspaceId>,
     user_store: Entity<UserStore>,
     project: Entity<Project>,
     fs: Arc<dyn Fs>,
@@ -490,13 +491,7 @@ pub struct AgentPanel {
 
 impl AgentPanel {
     fn serialize(&mut self, cx: &mut App) {
-        let workspace_id = self
-            .workspace
-            .read_with(cx, |workspace, _| workspace.database_id())
-            .ok()
-            .flatten();
-
-        let Some(workspace_id) = workspace_id else {
+        let Some(workspace_id) = self.workspace_id else {
             return;
         };
 
@@ -616,6 +611,7 @@ impl AgentPanel {
         let project = workspace.project();
         let language_registry = project.read(cx).languages().clone();
         let client = workspace.client().clone();
+        let workspace_id = workspace.database_id();
         let workspace = workspace.weak_handle();
 
         let context_server_registry =
@@ -721,6 +717,7 @@ impl AgentPanel {
         };
 
         let mut panel = Self {
+            workspace_id,
             active_view,
             workspace,
             user_store,
