@@ -314,7 +314,10 @@ impl TeacherPrompt {
                 markers.push((pos, Kind::UserCursor));
                 pos += cur_marker.len();
             } else {
-                pos += 1;
+                pos += text_with_markers[pos..]
+                    .chars()
+                    .next()
+                    .map_or(1, |c| c.len_utf8());
             }
         }
 
