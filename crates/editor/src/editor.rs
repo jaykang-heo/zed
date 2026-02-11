@@ -13628,11 +13628,15 @@ impl Editor {
                 }
 
                 let is_multiline_trim = trimmed_selections.len() > 1;
+                let mut multiline_trim_len: usize = 0;
                 for trimmed_range in trimmed_selections {
                     if is_first {
                         is_first = false;
                     } else if is_multiline_trim || !prev_selection_was_entire_line {
                         text += "\n";
+                        if is_multiline_trim {
+                            multiline_trim_len += 1;
+                        }
                     }
                     prev_selection_was_entire_line = is_entire_line && !is_multiline_trim;
                     let mut len = 0;
@@ -13644,10 +13648,24 @@ impl Editor {
                         text.push('\n');
                         len += 1;
                     }
+                    if is_multiline_trim {
+                        multiline_trim_len += len;
+                    } else {
+                        clipboard_selections.push(ClipboardSelection::for_buffer(
+                            len,
+                            is_entire_line,
+                            trimmed_range,
+                            &buffer,
+                            self.project.as_ref(),
+                            cx,
+                        ));
+                    }
+                }
+                if is_multiline_trim {
                     clipboard_selections.push(ClipboardSelection::for_buffer(
-                        len,
+                        multiline_trim_len,
                         is_entire_line,
-                        trimmed_range,
+                        start..end,
                         &buffer,
                         self.project.as_ref(),
                         cx,

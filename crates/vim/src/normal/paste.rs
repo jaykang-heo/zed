@@ -323,6 +323,7 @@ mod test {
         state::{Mode, Register},
         test::{NeovimBackedTestContext, VimTestContext},
     };
+    use editor::actions::CopyAndTrim;
     use gpui::ClipboardItem;
     use indoc::indoc;
     use language::{LanguageName, language_settings::LanguageSettingsContent};
@@ -1080,6 +1081,57 @@ mod test {
                 fish fish
                 two fisˇh
                 "},
+            Mode::Normal,
+        );
+    }
+
+    #[gpui::test]
+    async fn test_copy_and_trim_then_paste(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+
+        cx.set_state(
+            indoc! {"
+                pub fn no_indentation() {
+                    todo!()
+                }
+
+                impl WithIndentation {
+                    pub fn example() {
+                        todo!()
+                    }
+
+                    ˇpub fn after_whitespace() {
+                        todo!()
+                    }
+                }
+            "},
+            Mode::Normal,
+        );
+
+        // Select 3 lines in visual line mode (V then jj)
+        cx.simulate_keystrokes("shift-v j j");
+
+        // Use copy-and-trim (the editor action, not vim yank)
+        cx.update_editor(|editor, window, cx| {
+            editor.copy_and_trim(&CopyAndTrim, window, cx);
+        });
+
+        // Open position at end of buffer and paste
+        cx.set_state(
+            indoc! {"
+                ˇ
+            "},
+            Mode::Normal,
+        );
+        cx.simulate_keystrokes("p");
+
+        cx.assert_state(
+            indoc! {"
+
+                ˇpub fn after_whitespace() {
+                    todo!()
+                }
+            "},
             Mode::Normal,
         );
     }
