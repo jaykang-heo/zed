@@ -21,6 +21,20 @@ use std::sync::Arc;
 
 use std::ops::Range;
 
+/// Find the largest valid UTF-8 char boundary at or before `index` in `s`.
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        s.len()
+    } else if s.is_char_boundary(index) {
+        index
+    } else {
+        (0..index)
+            .rev()
+            .find(|&i| s.is_char_boundary(i))
+            .unwrap_or(0)
+    }
+}
+
 pub async fn run_scoring(
     example: &mut Example,
     args: &PredictArgs,
@@ -176,6 +190,7 @@ pub async fn run_scoring_impl(example: &mut Example) -> anyhow::Result<()> {
             let length_delta = new_text_len as isize - old_text_len as isize;
             let new_region_len = (old_region_len as isize + length_delta).max(0) as usize;
             let new_region_len = new_region_len.min(actual_text.len());
+            let new_region_len = floor_char_boundary(&actual_text, new_region_len);
             actual_text[..new_region_len].to_string()
         });
 
