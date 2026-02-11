@@ -1,5 +1,5 @@
 use crate::udiff::DiffLine;
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow, fmt::Write as _, mem, ops::Range, path::Path, sync::Arc};
 use telemetry_events::EditPredictionRating;
@@ -403,65 +403,39 @@ impl ExampleSpec {
             return Ok((excerpt, selections));
         }
 
-        let marker_offset = input
-            .find(SELECTION_MARKER)
-            .or_else(|| input.find(CURSOR_POSITION_MARKER))
-            .context("missing [SELECTION] marker")?;
-        let marker_line_start = input[..marker_offset]
-            .rfind('\n')
-            .map(|pos| pos + 1)
-            .unwrap_or(0);
-        let marker_line_end = input[marker_line_start..]
-            .find('\n')
-            .map(|pos| marker_line_start + pos + 1)
-            .unwrap_or(input.len());
-        let marker_line = &input[marker_line_start..marker_line_end].trim_end_matches('\n');
+        if !input.contains(CURSOR_POSITION_MARKER) && !input.contains(SELECTION_MARKER) {
+            return Ok((input.clone(), Vec::new()));
+        }
 
-        let (cursor_column, selection_start_column) = if let Some(caret_pos) = marker_line.find('^')
-        {
-            // Count dashes before the caret to determine selection start.
-            // The cursor is always at the end of the selection (at the caret position).
-            let dashes_before = marker_line[..caret_pos]
-                .chars()
-                .rev()
-                .take_while(|&c| c == '-')
-                .count();
+        let mut selections = Vec::new();
+        let mut clean_lines: Vec<&str> = Vec::new();
+        let mut clean_byte_offset = 0usize;
+        let mut last_content_line_start = 0usize;
 
-            // Check if there's a `<` before the dashes, indicating selection starts at column 0.
-            // Format: `#<---^` means selection from column 0 to cursor position.
-            let before_dashes_pos = caret_pos - dashes_before;
-            let has_left_angle_bracket =
-                before_dashes_pos > 0 && marker_line[..before_dashes_pos].ends_with('<');
+        for line in input.split('\n') {
+            let is_marker = (line.contains(CURSOR_POSITION_MARKER)
+                || line.contains(SELECTION_MARKER))
+                && (line.contains('^') || line.contains('<'));
 
-            let selection_start_col = if has_left_angle_bracket {
-                0
+            if is_marker {
+                let (cursor_column, selection_start_column) = parse_marker_line_columns(line)?;
+                let cursor_offset = last_content_line_start + cursor_column;
+                let selection_start_offset = last_content_line_start + selection_start_column;
+                selections.push(selection_start_offset..cursor_offset);
             } else {
-                caret_pos - dashes_before
-            };
+                if !clean_lines.is_empty() {
+                    clean_byte_offset += 1;
+                }
+                last_content_line_start = clean_byte_offset;
+                clean_byte_offset += line.len();
+                clean_lines.push(line);
+            }
+        }
 
-            (caret_pos, selection_start_col)
-        } else if let Some(left_angle_pos) = marker_line.find('<') {
-            let first_non_whitespace = marker_line
-                .find(|c: char| !c.is_whitespace())
-                .unwrap_or(left_angle_pos);
-            (first_non_whitespace, first_non_whitespace)
-        } else {
-            anyhow::bail!("cursor position marker line must contain '^' or '<' before [SELECTION]");
-        };
+        let excerpt = clean_lines.join("\n");
+        let excerpt = excerpt.trim_end_matches('\n').to_string();
 
-        let mut excerpt = input[..marker_line_start].to_string() + &input[marker_line_end..];
-        excerpt.truncate(excerpt.trim_end_matches('\n').len());
-
-        // The cursor is on the line above the marker line.
-        let cursor_line_end = marker_line_start.saturating_sub(1);
-        let cursor_line_start = excerpt[..cursor_line_end]
-            .rfind('\n')
-            .map(|pos| pos + 1)
-            .unwrap_or(0);
-        let cursor_offset = cursor_line_start + cursor_column;
-        let selection_start_offset = cursor_line_start + selection_start_column;
-
-        Ok((excerpt, vec![selection_start_offset..cursor_offset]))
+        Ok((excerpt, selections))
     }
 
     /// Sets the cursor position excerpt from a plain excerpt and selection range.
@@ -477,84 +451,78 @@ impl ExampleSpec {
         selections: &[Range<usize>],
         line_comment_prefix: &str,
     ) {
-        if selections.len() != 1 {
-            self.cursor_position = embed_inline_selections(excerpt, selections);
+        if selections.is_empty() {
+            self.cursor_position = excerpt.to_string();
             return;
         }
 
-        let selection = &selections[0];
-        let cursor_offset = selection.end;
-        let selection_start = selection.start;
-        let is_empty_selection = selection.start == selection.end;
-
-        // Find which line the cursor is on and its column.
-        let cursor_line_start = excerpt[..cursor_offset]
-            .rfind('\n')
-            .map(|pos| pos + 1)
-            .unwrap_or(0);
-        let cursor_line_end = excerpt[cursor_line_start..]
-            .find('\n')
-            .map(|pos| cursor_line_start + pos + 1)
-            .unwrap_or(excerpt.len());
-        let cursor_line = &excerpt[cursor_line_start..cursor_line_end];
-        let cursor_line_indent = &cursor_line[..cursor_line.len() - cursor_line.trim_start().len()];
-        let cursor_column = cursor_offset - cursor_line_start;
-        let selection_start_column = selection_start.saturating_sub(cursor_line_start);
-
-        // Build the marker line.
-        let mut marker_line = String::new();
-        if selection_start_column == 0 && !is_empty_selection {
-            // Selection starts at column 0, use `<` format.
-            // The `<` represents column 0, dashes cover columns 1 to cursor_column-1,
-            // and `^` points to cursor_column.
-            marker_line.push_str(line_comment_prefix);
-            marker_line.push('<');
-            for _ in "<^".len()..cursor_column {
-                marker_line.push('-');
-            }
-            marker_line.push('^');
-            marker_line.push_str(SELECTION_MARKER);
-        } else if cursor_column < line_comment_prefix.len() && is_empty_selection {
-            // Cursor at column 0 with empty selection.
-            for _ in 0..cursor_column {
-                marker_line.push(' ');
-            }
-            marker_line.push_str(line_comment_prefix);
-            write!(marker_line, " <{}", CURSOR_POSITION_MARKER).unwrap();
-        } else {
-            // Normal case with `^` format.
-            if cursor_column >= cursor_line_indent.len() + line_comment_prefix.len() {
-                marker_line.push_str(cursor_line_indent);
-            }
-            marker_line.push_str(line_comment_prefix);
-
-            // Write spaces and dashes up to cursor position.
-            for i in marker_line.len()..cursor_column {
-                if i >= selection_start_column && !is_empty_selection {
-                    marker_line.push('-');
-                } else {
-                    marker_line.push(' ');
+        // If any non-empty selection spans multiple lines, fall back to inline markers.
+        for selection in selections {
+            if selection.start != selection.end {
+                let start_line = excerpt[..selection.start].matches('\n').count();
+                let end_line = excerpt[..selection.end].matches('\n').count();
+                if start_line != end_line {
+                    self.cursor_position = embed_inline_selections(excerpt, selections);
+                    return;
                 }
             }
+        }
 
-            marker_line.push('^');
-            if is_empty_selection {
-                marker_line.push_str(CURSOR_POSITION_MARKER);
-            } else {
-                marker_line.push_str(SELECTION_MARKER);
+        // Compute line boundaries: (start_byte, end_byte) for each line's content
+        // (end_byte is exclusive and does NOT include the '\n').
+        let mut line_ranges: Vec<Range<usize>> = Vec::new();
+        let mut offset = 0;
+        for line in excerpt.split('\n') {
+            let end = offset + line.len();
+            line_ranges.push(offset..end);
+            offset = end + 1;
+        }
+
+        // Map each selection to the line containing its cursor (selection.end),
+        // sorted by (line_index, cursor_column) for deterministic output.
+        struct SelectionOnLine {
+            line_index: usize,
+            selection: Range<usize>,
+        }
+        let mut selections_on_lines: Vec<SelectionOnLine> = selections
+            .iter()
+            .map(|selection| {
+                let line_index = line_ranges
+                    .iter()
+                    .position(|r| selection.end >= r.start && selection.end <= r.end)
+                    .unwrap_or(line_ranges.len() - 1);
+                SelectionOnLine {
+                    line_index,
+                    selection: selection.clone(),
+                }
+            })
+            .collect();
+        selections_on_lines.sort_by_key(|s| (s.line_index, s.selection.end));
+
+        let mut result = String::new();
+        for (line_index, line_range) in line_ranges.iter().enumerate() {
+            if line_index > 0 {
+                result.push('\n');
             }
-        }
+            result.push_str(&excerpt[line_range.clone()]);
 
-        // Build the final cursor_position string.
-        let mut result = String::with_capacity(excerpt.len() + marker_line.len() + 2);
-        result.push_str(&excerpt[..cursor_line_end]);
-        if !result.ends_with('\n') {
-            result.push('\n');
-        }
-        result.push_str(&marker_line);
-        if cursor_line_end < excerpt.len() {
-            result.push('\n');
-            result.push_str(&excerpt[cursor_line_end..]);
+            let cursor_line = &excerpt[line_range.clone()];
+            let cursor_line_indent =
+                &cursor_line[..cursor_line.len() - cursor_line.trim_start().len()];
+
+            for sol in &selections_on_lines {
+                if sol.line_index != line_index {
+                    continue;
+                }
+                result.push('\n');
+                let marker = build_marker_line(
+                    &sol.selection,
+                    line_range.start,
+                    cursor_line_indent,
+                    line_comment_prefix,
+                );
+                result.push_str(&marker);
+            }
         }
 
         self.cursor_position = result;
@@ -716,6 +684,84 @@ impl ExampleSpec {
     }
 }
 
+fn build_marker_line(
+    selection: &Range<usize>,
+    line_start_offset: usize,
+    line_indent: &str,
+    line_comment_prefix: &str,
+) -> String {
+    let cursor_offset = selection.end;
+    let selection_start = selection.start;
+    let is_empty_selection = selection.start == selection.end;
+    let cursor_column = cursor_offset - line_start_offset;
+    let selection_start_column = selection_start.saturating_sub(line_start_offset);
+
+    let mut marker = String::new();
+    if selection_start_column == 0 && !is_empty_selection {
+        marker.push_str(line_comment_prefix);
+        marker.push('<');
+        for _ in "<^".len()..cursor_column {
+            marker.push('-');
+        }
+        marker.push('^');
+        marker.push_str(SELECTION_MARKER);
+    } else if cursor_column < line_comment_prefix.len() && is_empty_selection {
+        for _ in 0..cursor_column {
+            marker.push(' ');
+        }
+        marker.push_str(line_comment_prefix);
+        write!(marker, " <{}", CURSOR_POSITION_MARKER).ok();
+    } else {
+        if cursor_column >= line_indent.len() + line_comment_prefix.len() {
+            marker.push_str(line_indent);
+        }
+        marker.push_str(line_comment_prefix);
+
+        for i in marker.len()..cursor_column {
+            if i >= selection_start_column && !is_empty_selection {
+                marker.push('-');
+            } else {
+                marker.push(' ');
+            }
+        }
+
+        marker.push('^');
+        if is_empty_selection {
+            marker.push_str(CURSOR_POSITION_MARKER);
+        } else {
+            marker.push_str(SELECTION_MARKER);
+        }
+    }
+    marker
+}
+
+fn parse_marker_line_columns(line: &str) -> Result<(usize, usize)> {
+    if let Some(caret_pos) = line.find('^') {
+        let dashes_before = line[..caret_pos]
+            .chars()
+            .rev()
+            .take_while(|&c| c == '-')
+            .count();
+
+        let before_dashes_pos = caret_pos - dashes_before;
+        let has_left_angle_bracket =
+            before_dashes_pos > 0 && line[..before_dashes_pos].ends_with('<');
+
+        let selection_start_col = if has_left_angle_bracket {
+            0
+        } else {
+            caret_pos - dashes_before
+        };
+
+        Ok((caret_pos, selection_start_col))
+    } else if let Some(_) = line.find('<') {
+        let first_non_whitespace = line.find(|c: char| !c.is_whitespace()).unwrap_or(0);
+        Ok((first_non_whitespace, first_non_whitespace))
+    } else {
+        anyhow::bail!("cursor position marker line must contain '^' or '<' before [SELECTION]");
+    }
+}
+
 /// Extract all selection/cursor ranges from text containing inline
 /// `<|selection_start|>` and `<|user_cursor|>` markers.
 ///
@@ -810,6 +856,91 @@ fn embed_inline_selections(excerpt: &str, selections: &[Range<usize>]) -> String
 mod tests {
     use super::*;
     use indoc::indoc;
+    use util::test::marked_text_ranges;
+
+    #[test]
+    fn test_cursor_excerpt_with_multiple_selections() {
+        let mut spec = ExampleSpec {
+            name: String::new(),
+            repository_url: String::new(),
+            revision: String::new(),
+            tags: Vec::new(),
+            reasoning: None,
+            uncommitted_diff: String::new(),
+            cursor_path: Path::new("test.rs").into(),
+            cursor_position: String::new(),
+            edit_history: String::new(),
+            expected_patches: Vec::new(),
+            rejected_patch: None,
+            captured_prompt_input: None,
+            telemetry: None,
+            human_feedback: Vec::new(),
+            rating: None,
+        };
+
+        // Two cursors on different lines
+        let excerpt = indoc! {"
+            fn main() {
+                let x = 42;
+                let y = 99;
+            }"
+        };
+        let offset_x = excerpt.find("42").unwrap();
+        let offset_y = excerpt.find("99").unwrap();
+
+        spec.set_cursor_excerpt_with_selection(
+            excerpt,
+            &[offset_x..offset_x, offset_y..offset_y],
+            "//",
+        );
+        let (parsed_excerpt, parsed_selections) = spec.cursor_excerpt_with_selection().unwrap();
+        assert_eq!(parsed_excerpt, excerpt);
+        assert_eq!(
+            parsed_selections,
+            vec![offset_x..offset_x, offset_y..offset_y]
+        );
+
+        // Two cursors on the same line
+        let excerpt = indoc! {"
+            let (a, b) = (1, 2);
+            next_line"
+        };
+        let offset_a = excerpt.find('1').unwrap();
+        let offset_b = excerpt.find('2').unwrap();
+
+        spec.set_cursor_excerpt_with_selection(
+            excerpt,
+            &[offset_a..offset_a, offset_b..offset_b],
+            "//",
+        );
+        let (parsed_excerpt, parsed_selections) = spec.cursor_excerpt_with_selection().unwrap();
+        assert_eq!(parsed_excerpt, excerpt);
+        assert_eq!(
+            parsed_selections,
+            vec![offset_a..offset_a, offset_b..offset_b]
+        );
+
+        // Mixed: one cursor, one selection, different lines
+        let excerpt = indoc! {"
+            import module
+            from other import thing"
+        };
+        let cursor_offset = excerpt.find("module").unwrap();
+        let sel_start = excerpt.find("thing").unwrap();
+        let sel_end = sel_start + "thing".len();
+
+        spec.set_cursor_excerpt_with_selection(
+            excerpt,
+            &[cursor_offset..cursor_offset, sel_start..sel_end],
+            "#",
+        );
+        let (parsed_excerpt, parsed_selections) = spec.cursor_excerpt_with_selection().unwrap();
+        assert_eq!(parsed_excerpt, excerpt);
+        assert_eq!(
+            parsed_selections,
+            vec![cursor_offset..cursor_offset, sel_start..sel_end]
+        );
+    }
 
     #[test]
     fn test_cursor_excerpt_with_selection_caret() {
@@ -1249,5 +1380,465 @@ mod tests {
             spec.cursor_excerpt_with_selection().unwrap(),
             (excerpt.to_string(), vec![selection_start..selection_end])
         );
+    }
+
+    fn empty_spec() -> ExampleSpec {
+        ExampleSpec {
+            name: String::new(),
+            repository_url: String::new(),
+            revision: String::new(),
+            tags: Vec::new(),
+            reasoning: None,
+            uncommitted_diff: String::new(),
+            cursor_path: Path::new("test.rs").into(),
+            cursor_position: String::new(),
+            edit_history: String::new(),
+            expected_patches: Vec::new(),
+            rejected_patch: None,
+            captured_prompt_input: None,
+            telemetry: None,
+            human_feedback: Vec::new(),
+            rating: None,
+        }
+    }
+
+    #[test]
+    fn test_round_trip_single_cursor() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "cursor mid-line indented",
+                indoc! {"
+                    fn main() {
+                        let x = ˇ42;
+                    }"},
+                "//",
+                indoc! {"
+                    fn main() {
+                        let x = 42;
+                        //      ^[CURSOR_POSITION]
+                    }"},
+            ),
+            (
+                "cursor at column 0",
+                indoc! {"
+                    fn main() {
+                    ˇ    let x = 42;
+                    }"},
+                "//",
+                indoc! {"
+                    fn main() {
+                        let x = 42;
+                    // <[CURSOR_POSITION]
+                    }"},
+            ),
+            // Column 1 is still < "//".len(), so it also uses the `<` format
+            (
+                "cursor at column 1 (within comment prefix)",
+                indoc! {"
+                    fn main() {
+                     ˇ   let x = 42;
+                    }"},
+                "//",
+                indoc! {"
+                    fn main() {
+                        let x = 42;
+                     // <[CURSOR_POSITION]
+                    }"},
+            ),
+            (
+                "cursor at end of line",
+                indoc! {"
+                    fn main() {
+                        let x = 42;ˇ
+                    }"},
+                "//",
+                indoc! {"
+                    fn main() {
+                        let x = 42;
+                        //         ^[CURSOR_POSITION]
+                    }"},
+            ),
+            (
+                "cursor on first line",
+                indoc! {"
+                    fn ˇmain() {
+                        let x = 42;
+                    }"},
+                "//",
+                indoc! {"
+                    fn main() {
+                    // ^[CURSOR_POSITION]
+                        let x = 42;
+                    }"},
+            ),
+            (
+                "cursor on last line (col 0)",
+                indoc! {"
+                    fn main() {
+                        let x = 42;
+                    ˇ}"},
+                "//",
+                indoc! {"
+                    fn main() {
+                        let x = 42;
+                    }
+                    // <[CURSOR_POSITION]"},
+            ),
+            (
+                "single line cursor in middle",
+                "helloˇ world",
+                "//",
+                "hello world\n//   ^[CURSOR_POSITION]",
+            ),
+            (
+                "single line cursor at offset 0",
+                "ˇhello world",
+                "//",
+                "hello world\n// <[CURSOR_POSITION]",
+            ),
+            (
+                "single line cursor at end",
+                "hello worldˇ",
+                "//",
+                "hello world\n//         ^[CURSOR_POSITION]",
+            ),
+            (
+                "cursor on empty line",
+                "a\nˇ\nb",
+                "//",
+                "a\n\n// <[CURSOR_POSITION]\nb",
+            ),
+            (
+                "hash comment prefix",
+                indoc! {"
+                    def foo():
+                        ˇpass"},
+                "#",
+                indoc! {"
+                    def foo():
+                        pass
+                    #   ^[CURSOR_POSITION]"},
+            ),
+            (
+                "double-dash comment prefix",
+                "SELECT ˇ* FROM t",
+                "--",
+                "SELECT * FROM t\n--     ^[CURSOR_POSITION]",
+            ),
+        ];
+
+        for (name, marked_excerpt, comment_prefix, expected_encoded) in cases {
+            let (excerpt, selections) = marked_text_ranges(marked_excerpt, false);
+            let mut spec = empty_spec();
+
+            spec.set_cursor_excerpt_with_selection(&excerpt, &selections, comment_prefix);
+            assert_eq!(
+                spec.cursor_position, *expected_encoded,
+                "case {name:?}: encoded form mismatch"
+            );
+
+            let (parsed_excerpt, parsed_selections) = spec
+                .cursor_excerpt_with_selection()
+                .unwrap_or_else(|e| panic!("case {name:?}: parse failed: {e}"));
+            assert_eq!(
+                parsed_excerpt, excerpt,
+                "case {name:?}: round-trip excerpt mismatch"
+            );
+            assert_eq!(
+                parsed_selections, selections,
+                "case {name:?}: round-trip selections mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn test_round_trip_single_selection() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "selection mid-line",
+                indoc! {"
+                    import «module»
+                    from other import thing"},
+                "#",
+                indoc! {"
+                    import module
+                    #      ------^[SELECTION]
+                    from other import thing"},
+            ),
+            (
+                "selection from column 0",
+                indoc! {"
+                    «import module»
+                    from other import thing"},
+                "#",
+                indoc! {"
+                    import module
+                    #<-----------^[SELECTION]
+                    from other import thing"},
+            ),
+            (
+                "selection covering full second line from col 0",
+                indoc! {"
+                    import module
+                    «from other import thing»"},
+                "#",
+                indoc! {"
+                    import module
+                    from other import thing
+                    #<---------------------^[SELECTION]"},
+            ),
+            (
+                "multi-line selection uses inline markers",
+                indoc! {"
+                    import «module
+                    from other import »thing"},
+                "#",
+                &format!(
+                    "import {INLINE_SELECTION_START_MARKER}module\nfrom other import {INLINE_CURSOR_MARKER}thing"
+                ),
+            ),
+        ];
+
+        for (name, marked_excerpt, comment_prefix, expected_encoded) in cases {
+            let (excerpt, selections) = marked_text_ranges(marked_excerpt, false);
+            let mut spec = empty_spec();
+
+            spec.set_cursor_excerpt_with_selection(&excerpt, &selections, comment_prefix);
+            assert_eq!(
+                spec.cursor_position, *expected_encoded,
+                "case {name:?}: encoded form mismatch"
+            );
+
+            let (parsed_excerpt, parsed_selections) = spec
+                .cursor_excerpt_with_selection()
+                .unwrap_or_else(|e| panic!("case {name:?}: parse failed: {e}"));
+            assert_eq!(
+                parsed_excerpt, excerpt,
+                "case {name:?}: round-trip excerpt mismatch"
+            );
+            assert_eq!(
+                parsed_selections, selections,
+                "case {name:?}: round-trip selections mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn test_round_trip_multiple_selections() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "two cursors same line",
+                "let (a, b) = (ˇ1, ˇ2);\nnext_line",
+                "//",
+                "let (a, b) = (1, 2);\n//            ^[CURSOR_POSITION]\n//               ^[CURSOR_POSITION]\nnext_line",
+            ),
+            (
+                "two cursors different lines",
+                "let (ˇa, b) = (1, 2);\nnext_ˇline",
+                "//",
+                "let (a, b) = (1, 2);\n//   ^[CURSOR_POSITION]\nnext_line\n//   ^[CURSOR_POSITION]",
+            ),
+            (
+                "two selections different lines",
+                "let («a», b) = (1, 2);\nnext_«line»",
+                "//",
+                "let (a, b) = (1, 2);\n//   -^[SELECTION]\nnext_line\n//   ----^[SELECTION]",
+            ),
+            (
+                "cursor and selection on different lines",
+                "let ˇ(a, b) = (1, 2);\nnext_«line»",
+                "//",
+                "let (a, b) = (1, 2);\n//  ^[CURSOR_POSITION]\nnext_line\n//   ----^[SELECTION]",
+            ),
+            (
+                "three cursors on three lines",
+                "aˇaa\nbˇbb\ncˇcc",
+                "#",
+                "aaa\n#^[CURSOR_POSITION]\nbbb\n#^[CURSOR_POSITION]\nccc\n#^[CURSOR_POSITION]",
+            ),
+            // A standalone cursor before a selection_start is ambiguous in
+            // the inline marker format (misparsed as a backwards selection),
+            // so the cursor must come after the selection in offset order.
+            (
+                "multi-line selection with cursor forces inline",
+                "aaa\n«bbb\nc»ccˇ",
+                "#",
+                &format!(
+                    "aaa\n{INLINE_SELECTION_START_MARKER}bbb\nc{INLINE_CURSOR_MARKER}cc{INLINE_CURSOR_MARKER}"
+                ),
+            ),
+        ];
+
+        for (name, marked_excerpt, comment_prefix, expected_encoded) in cases {
+            let (excerpt, selections) = marked_text_ranges(marked_excerpt, false);
+            let mut spec = empty_spec();
+
+            spec.set_cursor_excerpt_with_selection(&excerpt, &selections, comment_prefix);
+            assert_eq!(
+                spec.cursor_position, *expected_encoded,
+                "case {name:?}: encoded form mismatch"
+            );
+
+            let (parsed_excerpt, parsed_selections) = spec
+                .cursor_excerpt_with_selection()
+                .unwrap_or_else(|e| panic!("case {name:?}: parse failed: {e}"));
+            assert_eq!(
+                parsed_excerpt, excerpt,
+                "case {name:?}: round-trip excerpt mismatch"
+            );
+            assert_eq!(
+                parsed_selections, selections,
+                "case {name:?}: round-trip selections mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn test_round_trip_empty_selections() {
+        let mut spec = empty_spec();
+        spec.set_cursor_excerpt_with_selection("hello world", &[], "//");
+        assert_eq!(spec.cursor_position, "hello world");
+    }
+
+    #[test]
+    fn test_parse_inline_markers() {
+        let cases: &[(&str, &str, &str, &[Range<usize>])] = &[
+            (
+                "single inline cursor",
+                &format!("let x = {INLINE_CURSOR_MARKER}42;"),
+                "let x = 42;",
+                &[8..8],
+            ),
+            (
+                "inline cursor at start of file",
+                &format!("{INLINE_CURSOR_MARKER}hello"),
+                "hello",
+                &[0..0],
+            ),
+            (
+                "inline cursor at end of file",
+                &format!("hello{INLINE_CURSOR_MARKER}"),
+                "hello",
+                &[5..5],
+            ),
+            (
+                "inline selection",
+                &format!("let x = {INLINE_SELECTION_START_MARKER}42{INLINE_CURSOR_MARKER};"),
+                "let x = 42;",
+                &[8..10],
+            ),
+            (
+                "multiple inline cursors",
+                &format!("a{INLINE_CURSOR_MARKER}b{INLINE_CURSOR_MARKER}c"),
+                "abc",
+                &[1..1, 2..2],
+            ),
+            (
+                "mixed inline cursor and selection",
+                &format!(
+                    "{INLINE_SELECTION_START_MARKER}hello{INLINE_CURSOR_MARKER} {INLINE_CURSOR_MARKER}world"
+                ),
+                "hello world",
+                &[0..5, 6..6],
+            ),
+            (
+                "inline selection spanning multiple lines",
+                &format!(
+                    "line1\n{INLINE_SELECTION_START_MARKER}line2\nli{INLINE_CURSOR_MARKER}ne3"
+                ),
+                "line1\nline2\nline3",
+                &[6..14],
+            ),
+        ];
+
+        for (name, cursor_position, expected_excerpt, expected_selections) in cases {
+            let mut spec = empty_spec();
+            spec.cursor_position = cursor_position.to_string();
+
+            let (parsed_excerpt, parsed_selections) = spec
+                .cursor_excerpt_with_selection()
+                .unwrap_or_else(|e| panic!("case {name:?}: parse failed: {e}"));
+            assert_eq!(
+                parsed_excerpt, *expected_excerpt,
+                "case {name:?}: excerpt mismatch"
+            );
+            assert_eq!(
+                parsed_selections, *expected_selections,
+                "case {name:?}: selections mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_no_markers_returns_empty_selections() {
+        let mut spec = empty_spec();
+        spec.cursor_position = "just plain text\nno markers here".to_string();
+        let (excerpt, selections) = spec.cursor_excerpt_with_selection().unwrap();
+        assert_eq!(excerpt, "just plain text\nno markers here");
+        assert_eq!(selections, Vec::<Range<usize>>::new());
+    }
+
+    #[test]
+    fn test_round_trip_deeply_indented_excerpt() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "cursor on deeply indented line",
+                indoc! {"
+                    fn process(items: &[Item]) -> Result<()> {
+                        for item in items {
+                            if item.is_valid() {
+                                item.execute()ˇ?;
+                            }
+                        }
+                        Ok(())
+                    }"},
+                "//",
+            ),
+            (
+                "selection on deeply indented line",
+                indoc! {"
+                    fn process(items: &[Item]) -> Result<()> {
+                        for item in items {
+                            if item.«is_valid»() {
+                                item.execute()?;
+                            }
+                        }
+                        Ok(())
+                    }"},
+                "//",
+            ),
+            (
+                "mixed cursors and selection across indentation levels",
+                indoc! {"
+                    fn process(items: &[Item]) -> Result<()> {
+                        ˇfor item in items {
+                            if item.«is_valid»() {
+                                item.execute()?;
+                            }
+                        }
+                        ˇOk(())
+                    }"},
+                "//",
+            ),
+        ];
+
+        for (name, marked_excerpt, comment_prefix) in cases {
+            let (excerpt, selections) = marked_text_ranges(marked_excerpt, false);
+            let mut spec = empty_spec();
+
+            spec.set_cursor_excerpt_with_selection(&excerpt, &selections, comment_prefix);
+
+            let (parsed_excerpt, parsed_selections) = spec
+                .cursor_excerpt_with_selection()
+                .unwrap_or_else(|e| panic!("case {name:?}: parse failed: {e}"));
+            assert_eq!(
+                parsed_excerpt, excerpt,
+                "case {name:?}: round-trip excerpt mismatch"
+            );
+            assert_eq!(
+                parsed_selections, selections,
+                "case {name:?}: round-trip selections mismatch"
+            );
+        }
     }
 }
