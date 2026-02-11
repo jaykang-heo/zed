@@ -1092,16 +1092,16 @@ mod test {
         cx.set_state(
             indoc! {"
                 pub fn no_indentation() {
-                    todo!()
+                    println!()
                 }
 
                 impl WithIndentation {
                     pub fn example() {
-                        todo!()
+                        println!()
                     }
 
                     ˇpub fn after_whitespace() {
-                        todo!()
+                        println!()
                     }
                 }
             "},
@@ -1129,7 +1129,7 @@ mod test {
             indoc! {"
 
                 ˇpub fn after_whitespace() {
-                    todo!()
+                    println!()
                 }
             "},
             Mode::Normal,
