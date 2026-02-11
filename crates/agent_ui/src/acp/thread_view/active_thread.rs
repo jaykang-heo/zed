@@ -278,6 +278,7 @@ impl AcpThreadView {
                         this,
                         AuthRequired::new(),
                         agent_name,
+                        connection,
                         window,
                         cx,
                     );
