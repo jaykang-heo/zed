@@ -79,3 +79,77 @@ impl schemars::transform::Transform for AllowTrailingCommas {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use schemars::json_schema;
+    use schemars::transform::Transform;
+
+    fn schema_with_all_of() -> schemars::Schema {
+        json_schema!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" }
+            },
+            "allOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string" },
+                        "args": { "type": "array", "items": { "type": "string" } }
+                    },
+                    "required": ["command", "args"]
+                }
+            ],
+            "required": ["name"]
+        })
+    }
+
+    fn schema_without_all_of() -> schemars::Schema {
+        json_schema!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "description": { "type": "string" }
+            },
+            "required": ["name", "description"]
+        })
+    }
+
+    #[test]
+    fn test_deny_unknown_fields_uses_unevaluated_properties_when_all_of_present() {
+        let mut schema = schema_with_all_of();
+        DefaultDenyUnknownFields.transform(&mut schema);
+
+        let root = schema.as_object().expect("schema should be an object");
+
+        assert!(
+            root.contains_key("unevaluatedProperties"),
+            "Expected unevaluatedProperties on schema with allOf, \
+             but it was missing. Schema: {schema:#?}",
+        );
+        assert!(
+            !root.contains_key("additionalProperties"),
+            "additionalProperties should not be set when allOf is present, \
+             because it would reject properties from allOf members. Schema: {schema:#?}",
+        );
+    }
+
+    #[test]
+    fn test_deny_unknown_fields_uses_additional_properties_without_all_of() {
+        let mut schema = schema_without_all_of();
+        DefaultDenyUnknownFields.transform(&mut schema);
+
+        let root = schema.as_object().expect("schema should be an object");
+
+        assert!(
+            root.contains_key("additionalProperties"),
+            "Expected additionalProperties on schema without allOf. Schema: {schema:#?}",
+        );
+        assert!(
+            !root.contains_key("unevaluatedProperties"),
+            "unevaluatedProperties should not be set when allOf is absent. Schema: {schema:#?}",
+        );
+    }
+}
