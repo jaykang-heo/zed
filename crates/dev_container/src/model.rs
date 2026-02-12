@@ -1,6 +1,7 @@
 use std::{collections::HashMap, path::Path, process::Output, sync::Arc};
 
 use serde::{Deserialize, Deserializer, Serialize};
+use serde_json_lenient::Value;
 use smol::process::Command;
 
 use crate::{DevContainerConfig, devcontainer_api::DevContainerUp};
@@ -35,13 +36,13 @@ pub(crate) struct DevContainer {
     pub(crate) image: Option<String>,
     pub(crate) name: Option<String>,
     remote_user: Option<String>,
-    // TODO things we're not yet accounting for below
-    forward_ports: Option<Vec<String>>, // TODO not strings actually, more complex object
-    ports_attributes: Option<HashMap<String, PortsAttributes>>, // TODO key here should be the same object as what's used above for forwardPorts
-    other_ports_attributes: Option<PortsAttributes>, // TODO I think that's right? Confirm the spec when you get to it
+    forward_ports: Option<Vec<ForwardPort>>,
+    ports_attributes: Option<HashMap<String, PortAttributes>>, // TODO key here should be the same object as what's used above for forwardPorts
+    other_ports_attributes: Option<PortAttributes>, // TODO I think that's right? Confirm the spec when you get to it
     container_env: Option<HashMap<String, String>>,
     remote_env: Option<HashMap<String, String>>,
     container_user: Option<String>,
+    #[serde(rename = "updateRemoteUserUID")]
     update_remote_user_uid: Option<bool>,
     user_env_probe: Option<UserEnvProbe>,
     override_command: Option<bool>,
@@ -51,7 +52,7 @@ pub(crate) struct DevContainer {
     cap_add: Option<Vec<String>>,
     security_opt: Option<Vec<String>>,
     mounts: Option<String>, // TODO the type here is weird, check spec when you get to it
-    features: Option<HashMap<String, String>>, // TODO more complex object probably needed here
+    features: Option<HashMap<String, FeaturePlaceholder>>, // TODO more complex object probably needed here
     override_feature_install_order: Option<Vec<String>>,
     // TODO customizations
     build: Option<ContainerBuild>,
@@ -76,6 +77,10 @@ pub(crate) struct DevContainer {
 
 #[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct FeaturePlaceholder {} // Putting this here for now, but we should probably use DevContainerFeature
+
+#[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct HostRequirements {
     cpus: Option<u16>,
     memory: Option<String>,
@@ -86,13 +91,118 @@ pub(crate) struct HostRequirements {
 #[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum LifecycleCommand {
+    InitializeCommand,
+    OnCreateCommand,
     UpdateContentCommand,
-    OnCreatecommand,
+    PostCreateCommand,
+    PostStartCommand,
 }
 
-#[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct LifecyleScript; // TODO
+#[derive(Debug, Serialize, Eq, PartialEq)]
+struct LifecycleScriptInternal {
+    command: Option<String>,
+    args: Vec<String>,
+}
+
+impl LifecycleScriptInternal {
+    fn from_args(args: Vec<String>) -> Self {
+        let command = args.get(0).map(|a| a.to_string());
+        let remaining = args.iter().skip(1).map(|a| a.to_string()).collect();
+        Self {
+            command,
+            args: remaining,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Eq, PartialEq)]
+pub(crate) struct LifecyleScript {
+    scripts: HashMap<String, LifecycleScriptInternal>,
+}
+
+impl LifecyleScript {
+    fn from_map(args: HashMap<String, Vec<String>>) -> Self {
+        Self {
+            scripts: args
+                .into_iter()
+                .map(|(k, v)| (k, LifecycleScriptInternal::from_args(v)))
+                .collect(),
+        }
+    }
+    fn from_str(args: &str) -> Self {
+        let script: Vec<String> = args.split(" ").map(|a| a.to_string()).collect();
+
+        Self::from_args(script)
+    }
+    fn from_args(args: Vec<String>) -> Self {
+        Self::from_map(HashMap::from([("default".to_string(), args)]))
+    }
+}
+
+impl<'de> Deserialize<'de> for LifecyleScript {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::{self, Visitor};
+        use std::fmt;
+
+        struct LifecycleScriptVisitor;
+
+        impl<'de> Visitor<'de> for LifecycleScriptVisitor {
+            type Value = LifecyleScript;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a string, an array of strings, or a map of arrays")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(LifecyleScript::from_str(value))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let mut array = Vec::new();
+                while let Some(elem) = seq.next_element()? {
+                    array.push(elem);
+                }
+                Ok(LifecyleScript::from_args(array))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::MapAccess<'de>,
+            {
+                let mut result = HashMap::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    let value: Value = map.next_value()?;
+                    let script_args = match value {
+                        Value::String(s) => {
+                            s.split(" ").map(|s| s.to_string()).collect::<Vec<String>>()
+                        }
+                        Value::Array(arr) => {
+                            let strings: Vec<String> = arr
+                                .into_iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect();
+                            strings
+                        }
+                        _ => continue,
+                    };
+                    result.insert(key, script_args);
+                }
+                Ok(LifecyleScript::from_map(result))
+            }
+        }
+
+        deserializer.deserialize_any(LifecycleScriptVisitor)
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -115,9 +225,39 @@ pub(crate) enum UserEnvProbe {
     LoginInteractiveShell,
 }
 
+#[derive(Debug, Deserialize, Serialize, Eq, PartialEq, Clone)]
+#[serde(untagged)]
+pub(crate) enum ForwardPort {
+    Number(u16),
+    String(String),
+}
 #[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct PortsAttributes;
+pub(crate) enum PortAttributeProtocol {
+    Https,
+    Http,
+}
+
+#[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum OnAutoForward {
+    Notify,
+    OpenBrowser,
+    OpenBrowserOnce,
+    OpenPreview,
+    Silent,
+    Ignore,
+}
+
+#[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PortAttributes {
+    label: String,
+    on_auto_forward: OnAutoForward,
+    elevate_if_needed: bool,
+    require_local_port: bool,
+    protocol: PortAttributeProtocol,
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum RenameMeError {
@@ -450,11 +590,16 @@ mod test {
 
     use crate::model::{
         DevContainer, DockerConfigLabels, DockerInspect, DockerInspectConfig, DockerPs,
-        RenameMeError, create_docker_inspect, create_docker_run_command,
-        deserialize_devcontainer_json, deserialize_json_output, get_remote_dir_from_config,
-        get_remote_user_from_config,
+        FeaturePlaceholder, ForwardPort, LifecycleCommand, LifecyleScript, OnAutoForward,
+        PortAttributeProtocol, PortAttributes, RenameMeError, UserEnvProbe, create_docker_inspect,
+        create_docker_run_command, deserialize_devcontainer_json, deserialize_json_output,
+        get_remote_dir_from_config, get_remote_user_from_config,
     };
 
+    // Tests needed as I come across them
+    // - portsAttributes should reference ports defined in forwardPorts
+    //   - This can be either a specification (e.g. "db:5432"), a specific port (3000), or a port range (3000-5000)
+    //   - So, we need to do a post-parsing validation there
     #[test]
     fn should_deserialize_simple_devcontainer_json() {
         let given_bad_json = "{ \"image\": 123 }";
@@ -468,18 +613,141 @@ mod test {
             RenameMeError::DevContainerParseFailed
         );
 
-        let given_good_json = r#"
+        // COMMON
+        // name (done)
+        // forwardPorts (done)
+        // portsAttributes (done)
+        // otherPortsAttributes (done)
+        // remoteUser (done)
+        // update_remote_user_uid (done)
+        // remote_env (done)
+        // initialize_command (done)
+        // on_create_command: (done)
+        // update_content_command (done)
+        // post_create_command (done)
+        // post_start_command (done)
+        // post_attach_command (done)
+        // wait_for (done)
+        // user_env_probe: (done)
+        // features (done) (for now)
+        // override_feature_install_order: Option<Vec<String>>,
+        // host_requirements: Option<HostRequirements>,
+        // // TODO customizations (part of common, not yet implemented)
+        // // TODO additional Properties?
+
+        // NONCOMPOSE_BASE
+        // app_port: Option<String>, // TODO this could be string, int, array, so needs special care
+        // container_env: Option<HashMap<String, String>>,
+        // container_user: Option<String>,
+        // mounts: Option<String>, // TODO the type here is weird, check spec when you get to it
+        // run_args: Option<Vec<String>>,
+        // shutdown_action: Option<ShutdownAction>,
+        // override_command: Option<bool>,
+        // workspace_folder: Option<String>,
+        // workspace_mount: Option<String>,
+
+        // DOCKERFILECONTAINER (this is complicated so needs to be subdivided)
+        // build: Option<ContainerBuild>,
+        // dockerfile (TODO)
+        // context (TODO)
+        //
+
+        // BUILD_OPTIONS
+        // target (todo)
+        // args: (TODO)
+        // cacheFrom (TODO)
+
+        // IMAGE_CONTAINER
+        // image (done)
+
+        // COMPOSE_CONTAINER
+        // docker_compose_file: Option<Vec<String>>, // TODO this can be a string or array of strings
+        // service: Option<String>,
+        // run_services: Option<Vec<String>>,
+        // workspace_folder: Option<String>, (Note this is in non-compose base too, but just means different things in that context)
+        // shutdownAction (TODO)
+        // overrideCommand (TODO)
+
+        // TODO What are these? Why aren't they in the spec json?
+        // init: Option<bool>, // Bro what
+        // privileged: Option<bool>, // what
+        // cap_add: Option<Vec<String>>, // What
+        // security_opt: Option<Vec<String>>, // What
+        //
+        //
+        // Ok so the overall json is either:
+        // _just_ devcontainer commmon
+        // OR
+        // devcontainer common + ( (composeContainer) OR (noncomposebase + (dockerfilecontainer OR imageContainer)))
+        //
+        // Ok so my test cases:
+        // common container -- wait how does this work? no image?
+        // common conatiner + composecontainer
+        // common container + noncomposecontainer + dockerfilecontainer
+        // common container + noncomposecontainer + imageContainer
+
+        let given_base_common_json = r#"
             // These are some external comments. serde_lenient should handle them
             {
                 // These are some internal comments
                 "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
                 "name": "myDevContainer",
                 "remoteUser": "root",
+                "forwardPorts": [
+                    "db:5432",
+                    3000
+                ],
+                "portsAttributes": {
+                    "3000": {
+                        "label": "This Port",
+                        "onAutoForward": "notify",
+                        "elevateIfNeeded": false,
+                        "requireLocalPort": true,
+                        "protocol": "https"
+                    },
+                    "db:5432": {
+                        "label": "This Port too",
+                        "onAutoForward": "silent",
+                        "elevateIfNeeded": true,
+                        "requireLocalPort": false,
+                        "protocol": "http"
+                    }
+                },
+                "otherPortsAttributes": {
+                    "label": "Other Ports",
+                    "onAutoForward": "openBrowser",
+                    "elevateIfNeeded": true,
+                    "requireLocalPort": true,
+                    "protocol": "https"
+                },
+                "updateRemoteUserUID": true,
+                "remoteEnv": {
+                    "MYVAR1": "myvarvalue",
+                    "MYVAR2": "myvarothervalue"
+                },
+                "initializeCommand": ["echo", "initialize_command"],
+                "onCreateCommand": "echo on_create_command",
+                "updateContentCommand": {
+                    "first": "echo update_content_command",
+                    "second": ["echo", "update_content_command"]
+                },
+                "postCreateCommand": ["echo", "post_create_command"],
+                "postStartCommand": "echo post_start_command",
+                "postAttachCommand": {
+                    "something": "echo post_attach_command",
+                    "something1": "echo something else",
+                },
+                "waitFor": "postStartCommand",
+                "userEnvProbe": "loginShell",
+                "features": {
+              		"ghcr.io/devcontainers/features/aws-cli:1": {},
+              		"ghcr.io/devcontainers/features/anaconda:1": {}
+               	}
             }
             "#;
 
         let result: Result<DevContainer, RenameMeError> =
-            deserialize_devcontainer_json(given_good_json);
+            deserialize_devcontainer_json(given_base_common_json);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -488,6 +756,90 @@ mod test {
                 image: Some(String::from("mcr.microsoft.com/devcontainers/base:ubuntu")),
                 name: Some(String::from("myDevContainer")),
                 remote_user: Some(String::from("root")),
+                forward_ports: Some(vec![
+                    ForwardPort::String("db:5432".to_string()),
+                    ForwardPort::Number(3000),
+                ]),
+                ports_attributes: Some(HashMap::from([
+                    (
+                        "3000".to_string(),
+                        PortAttributes {
+                            label: "This Port".to_string(),
+                            on_auto_forward: OnAutoForward::Notify,
+                            elevate_if_needed: false,
+                            require_local_port: true,
+                            protocol: PortAttributeProtocol::Https
+                        }
+                    ),
+                    (
+                        "db:5432".to_string(),
+                        PortAttributes {
+                            label: "This Port too".to_string(),
+                            on_auto_forward: OnAutoForward::Silent,
+                            elevate_if_needed: true,
+                            require_local_port: false,
+                            protocol: PortAttributeProtocol::Http
+                        }
+                    )
+                ])),
+                other_ports_attributes: Some(PortAttributes {
+                    label: "Other Ports".to_string(),
+                    on_auto_forward: OnAutoForward::OpenBrowser,
+                    elevate_if_needed: true,
+                    require_local_port: true,
+                    protocol: PortAttributeProtocol::Https
+                }),
+                update_remote_user_uid: Some(true),
+                remote_env: Some(HashMap::from([
+                    ("MYVAR1".to_string(), "myvarvalue".to_string()),
+                    ("MYVAR2".to_string(), "myvarothervalue".to_string())
+                ])),
+                initialize_command: Some(LifecyleScript::from_args(vec![
+                    "echo".to_string(),
+                    "initialize_command".to_string()
+                ])),
+                on_create_command: Some(LifecyleScript::from_str("echo on_create_command")),
+                update_content_command: Some(LifecyleScript::from_map(HashMap::from([
+                    (
+                        "first".to_string(),
+                        vec!["echo".to_string(), "update_content_command".to_string()]
+                    ),
+                    (
+                        "second".to_string(),
+                        vec!["echo".to_string(), "update_content_command".to_string()]
+                    )
+                ]))),
+                post_create_command: Some(LifecyleScript::from_str("echo post_create_command")),
+                post_start_command: Some(LifecyleScript::from_args(vec![
+                    "echo".to_string(),
+                    "post_start_command".to_string()
+                ])),
+                post_attach_command: Some(LifecyleScript::from_map(HashMap::from([
+                    (
+                        "something".to_string(),
+                        vec!["echo".to_string(), "post_attach_command".to_string()]
+                    ),
+                    (
+                        "something1".to_string(),
+                        vec![
+                            "echo".to_string(),
+                            "something".to_string(),
+                            "else".to_string()
+                        ]
+                    )
+                ]))),
+                wait_for: Some(LifecycleCommand::PostStartCommand),
+                user_env_probe: Some(UserEnvProbe::LoginShell),
+                features: Some(HashMap::from([
+                    (
+                        "ghcr.io/devcontainers/features/aws-cli:1".to_string(),
+                        FeaturePlaceholder {}
+                    ),
+                    (
+                        "ghcr.io/devcontainers/features/anaconda:1".to_string(),
+                        FeaturePlaceholder {}
+                    )
+                ])),
                 ..Default::default()
             }
         );
