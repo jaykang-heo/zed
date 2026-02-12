@@ -3,8 +3,8 @@ mod diff;
 mod mention;
 mod terminal;
 
-use agent_settings::AgentSettings;
-use settings::{Settings as _, ToolPermissionMode};
+use agent_settings::{AgentSettings, ToolPermissionRulesOutcome, check_tool_permission_rules};
+use settings::Settings as _;
 
 /// Key used in ACP ToolCall meta to store the tool's programmatic name.
 /// This is a workaround since ACP's ToolCall doesn't have a dedicated name field.
@@ -1798,94 +1798,27 @@ impl AcpThread {
             };
 
             let inputs = &permission_input.input_values;
-            let rules = match permissions.tools.get(permission_input.tool_name.as_str()) {
-                Some(rules) => rules,
-                None => {
-                    match permissions.default {
-                        ToolPermissionMode::Allow => {
-                            resolutions.push((
-                                ix,
-                                ToolCallStatus::InProgress,
-                                acp::PermissionOptionId::new("allow"),
-                            ));
-                        }
-                        ToolPermissionMode::Deny => {
-                            resolutions.push((
-                                ix,
-                                ToolCallStatus::Rejected,
-                                acp::PermissionOptionId::new("deny"),
-                            ));
-                        }
-                        ToolPermissionMode::Confirm => {}
-                    }
-                    continue;
-                }
-            };
-
-            // Use the same semantics as check_commands in tool_permissions:
-            // - DENY if ANY input matches a deny pattern (short-circuit)
-            // - CONFIRM if ANY input matches a confirm pattern
-            // - ALLOW only if ALL inputs match at least one allow pattern
-            let mut any_matched_deny = false;
-            let mut any_matched_confirm = false;
-            let mut all_matched_allow = true;
-            let mut had_any_inputs = false;
-
-            for input in inputs {
-                had_any_inputs = true;
-
-                if rules.always_deny.iter().any(|r| r.is_match(input)) {
-                    any_matched_deny = true;
-                    break;
-                }
-
-                if rules.always_confirm.iter().any(|r| r.is_match(input)) {
-                    any_matched_confirm = true;
-                }
-
-                if !rules.always_allow.iter().any(|r| r.is_match(input)) {
-                    all_matched_allow = false;
-                }
-            }
-
-            if any_matched_deny {
-                resolutions.push((
-                    ix,
-                    ToolCallStatus::Rejected,
-                    acp::PermissionOptionId::new("deny"),
-                ));
-                continue;
-            }
-
-            if any_matched_confirm {
-                continue;
-            }
-
-            if all_matched_allow && had_any_inputs {
-                resolutions.push((
-                    ix,
-                    ToolCallStatus::InProgress,
-                    acp::PermissionOptionId::new("allow"),
-                ));
-                continue;
-            }
-
-            match rules.default.unwrap_or(permissions.default) {
-                ToolPermissionMode::Allow => {
+            match check_tool_permission_rules(
+                permission_input.tool_name.as_str(),
+                inputs,
+                &permissions,
+                true,
+            ) {
+                ToolPermissionRulesOutcome::Allow => {
                     resolutions.push((
                         ix,
                         ToolCallStatus::InProgress,
                         acp::PermissionOptionId::new("allow"),
                     ));
                 }
-                ToolPermissionMode::Deny => {
+                ToolPermissionRulesOutcome::Deny(_) => {
                     resolutions.push((
                         ix,
                         ToolCallStatus::Rejected,
                         acp::PermissionOptionId::new("deny"),
                     ));
                 }
-                ToolPermissionMode::Confirm => {}
+                ToolPermissionRulesOutcome::Confirm => {}
             }
         }
 

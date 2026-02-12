@@ -192,6 +192,118 @@ impl CompiledRegex {
     }
 }
 
+/// The outcome of checking tool permission rules against inputs.
+///
+/// This is the result of the core pattern-matching logic shared between
+/// initial evaluation and re-evaluation of pending authorizations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolPermissionRulesOutcome {
+    Allow,
+    Deny(String),
+    Confirm,
+}
+
+/// Evaluates tool permission rules against a set of inputs.
+///
+/// This implements the core pattern-matching logic:
+/// 1. Check for invalid regex patterns (any invalid pattern blocks the tool)
+/// 2. **DENY**: If ANY input matches a deny pattern, deny immediately
+/// 3. **CONFIRM**: If ANY input matches a confirm pattern, confirm
+/// 4. **ALLOW**: If ALL inputs match at least one allow pattern (and `allow_enabled` is true), allow
+/// 5. Fall back to tool-specific default, then global default
+///
+/// The `allow_enabled` flag controls whether allow patterns are checked. This is set
+/// to `false` when we can't reliably parse shell commands (e.g., parse failures or
+/// unsupported shell syntax), ensuring we don't auto-allow potentially dangerous commands.
+pub fn check_tool_permission_rules(
+    tool_name: &str,
+    inputs: &[impl AsRef<str>],
+    permissions: &ToolPermissions,
+    allow_enabled: bool,
+) -> ToolPermissionRulesOutcome {
+    let rules = match permissions.tools.get(tool_name) {
+        Some(rules) => rules,
+        None => {
+            return match permissions.default {
+                ToolPermissionMode::Allow => ToolPermissionRulesOutcome::Allow,
+                ToolPermissionMode::Deny => {
+                    ToolPermissionRulesOutcome::Deny("Blocked by global default: deny".into())
+                }
+                ToolPermissionMode::Confirm => ToolPermissionRulesOutcome::Confirm,
+            };
+        }
+    };
+
+    check_tool_rules(tool_name, inputs, rules, allow_enabled, permissions.default)
+}
+
+/// Evaluates tool permission rules against a set of inputs, given already-resolved
+/// `ToolRules` and global default. This is the inner logic used by
+/// `check_tool_permission_rules` and can also be called directly when the caller
+/// has already looked up the rules.
+pub fn check_tool_rules(
+    tool_name: &str,
+    inputs: &[impl AsRef<str>],
+    rules: &ToolRules,
+    allow_enabled: bool,
+    global_default: ToolPermissionMode,
+) -> ToolPermissionRulesOutcome {
+    // Check for invalid regex patterns before evaluating rules.
+    if !rules.invalid_patterns.is_empty() {
+        let count = rules.invalid_patterns.len();
+        let pattern_word = if count == 1 { "pattern" } else { "patterns" };
+        return ToolPermissionRulesOutcome::Deny(format!(
+            "The {} tool cannot run because {} regex {} failed to compile. \
+             Please fix the invalid patterns in your tool_permissions settings.",
+            tool_name, count, pattern_word
+        ));
+    }
+
+    // Single pass through all inputs:
+    // - DENY: If ANY input matches a deny pattern, deny immediately (short-circuit)
+    // - CONFIRM: Track if ANY input matches a confirm pattern
+    // - ALLOW: Track if ALL inputs match at least one allow pattern
+    let mut any_matched_confirm = false;
+    let mut all_matched_allow = true;
+    let mut had_any_inputs = false;
+
+    for input in inputs {
+        let input = input.as_ref();
+        had_any_inputs = true;
+
+        if rules.always_deny.iter().any(|r| r.is_match(input)) {
+            return ToolPermissionRulesOutcome::Deny(format!(
+                "Command blocked by security rule for {} tool",
+                tool_name
+            ));
+        }
+
+        if rules.always_confirm.iter().any(|r| r.is_match(input)) {
+            any_matched_confirm = true;
+        }
+
+        if !rules.always_allow.iter().any(|r| r.is_match(input)) {
+            all_matched_allow = false;
+        }
+    }
+
+    if any_matched_confirm {
+        return ToolPermissionRulesOutcome::Confirm;
+    }
+
+    if allow_enabled && all_matched_allow && had_any_inputs {
+        return ToolPermissionRulesOutcome::Allow;
+    }
+
+    match rules.default.unwrap_or(global_default) {
+        ToolPermissionMode::Deny => {
+            ToolPermissionRulesOutcome::Deny(format!("{} tool is disabled", tool_name))
+        }
+        ToolPermissionMode::Allow => ToolPermissionRulesOutcome::Allow,
+        ToolPermissionMode::Confirm => ToolPermissionRulesOutcome::Confirm,
+    }
+}
+
 pub const HARDCODED_SECURITY_DENIAL_MESSAGE: &str = "Blocked by built-in security rule. This operation is considered too \
      harmful to be allowed, and cannot be overridden by settings.";
 
