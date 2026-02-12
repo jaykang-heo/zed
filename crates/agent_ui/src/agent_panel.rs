@@ -66,8 +66,8 @@ use ui::{
 };
 use util::ResultExt as _;
 use workspace::{
-    CollaboratorId, DraggedSelection, DraggedTab, ToggleZoom, ToolbarItemView, Workspace,
-    WorkspaceId,
+    CollaboratorId, DraggedSelection, DraggedTab, MultiWorkspace, ToggleZoom, ToolbarItemView,
+    Workspace, WorkspaceId,
     dock::{DockPosition, Panel, PanelEvent},
 };
 use zed_actions::{
@@ -1103,7 +1103,7 @@ impl AgentPanel {
     }
 
     pub fn go_back(&mut self, _: &workspace::GoBack, window: &mut Window, cx: &mut Context<Self>) {
-        match self.active_view {
+        match &self.active_view {
             ActiveView::Configuration | ActiveView::History { .. } => {
                 if let Some(previous_view) = self.previous_view.take() {
                     self.active_view = previous_view;
@@ -1125,7 +1125,31 @@ impl AgentPanel {
                 }
                 cx.notify();
             }
-            _ => {}
+            ActiveView::AgentThread { thread_view } => {
+                let navigated = thread_view.update(cx, |view, cx| view.go_back(window, cx));
+                if !navigated {
+                    if let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() {
+                        cx.defer_in(window, move |_, _window, cx| {
+                            handle
+                                .update(cx, |multi_workspace, window, cx| {
+                                    multi_workspace.go_back_workspace(window, cx);
+                                })
+                                .log_err();
+                        });
+                    }
+                }
+            }
+            _ => {
+                if let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() {
+                    cx.defer_in(window, move |_, _window, cx| {
+                        handle
+                            .update(cx, |multi_workspace, window, cx| {
+                                multi_workspace.go_back_workspace(window, cx);
+                            })
+                            .log_err();
+                    });
+                }
+            }
         }
     }
 
