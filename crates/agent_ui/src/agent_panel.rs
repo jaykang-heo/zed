@@ -2409,11 +2409,11 @@ impl AgentPanel {
             .anchor(gpui::Corner::BottomRight)
             .with_handle(self.thread_target_menu_handle.clone())
             .menu({
-                let current_target = current_target.clone();
+                let current_target = current_target;
                 move |window, cx| {
                     let current_target = current_target.clone();
                     Some(ContextMenu::build(window, cx, {
-                        let current_target = current_target.clone();
+                        let current_target = current_target;
                         move |menu, _window, _cx| {
                             let is_local_selected = current_target == ThreadTarget::LocalProject;
                             let is_new_worktree_selected =
