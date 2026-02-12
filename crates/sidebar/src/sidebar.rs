@@ -1,4 +1,5 @@
-use acp_thread::ThreadStatus;
+use acp_thread::{AcpThread, AcpThreadEvent, ThreadStatus};
+use agent_ui::acp::{self, AcpThreadHistory};
 use agent_ui::{AgentPanel, AgentPanelEvent};
 use db::kvp::KEY_VALUE_STORE;
 use fs::Fs;
@@ -650,16 +651,17 @@ impl PickerDelegate for WorkspacePickerDelegate {
 pub struct Sidebar {
     multi_workspace: Entity<MultiWorkspace>,
     width: Pixels,
+    thread_infos: HashMap<acp::SessionId, AgentThreadInfo>,
     picker: Entity<Picker<WorkspacePickerDelegate>>,
-    _subscription: Subscription,
+    _subscriptions: Vec<Subscription>,
     _project_subscriptions: Vec<Subscription>,
     _agent_panel_subscriptions: Vec<Subscription>,
     _thread_subscriptions: Vec<Subscription>,
+    _fetch_recent_projects: Task<()>,
     #[cfg(any(test, feature = "test-support"))]
     test_thread_infos: HashMap<usize, AgentThreadInfo>,
     #[cfg(any(test, feature = "test-support"))]
     test_recent_project_thread_titles: HashMap<SharedString, SharedString>,
-    _fetch_recent_projects: Task<()>,
 }
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
@@ -678,13 +680,47 @@ impl Sidebar {
                 .modal(false)
         });
 
-        let subscription = cx.observe_in(
+        let mut subscriptions = vec![cx.observe_in(
             &multi_workspace,
             window,
             |this, multi_workspace, window, cx| {
                 this.queue_refresh(multi_workspace, window, cx);
             },
-        );
+        )];
+
+        let weak_sidebar = cx.weak_entity();
+        let observe_thread_history = cx.observe_new::<AcpThreadHistory>({
+            let weak_sidebar = weak_sidebar.clone();
+            move |_view, _window, cx| {
+                let entity = cx.entity();
+                weak_sidebar
+                    .update(cx, |sidebar, cx| {
+                        sidebar._subscriptions.push(cx.subscribe(
+                            &entity,
+                            |sidebar, _emitter, event, cx| {
+                                // sidebar.handle_thread_activity(event, cx);
+                            },
+                        ));
+                    })
+                    .ok();
+            }
+        });
+
+        let observe_server_views = cx.observe_new::<AcpThread>({
+            let weak_sidebar = weak_sidebar.clone();
+            move |_view, _window, cx| {
+                let entity = cx.entity();
+                weak_sidebar
+                    .update(cx, |sidebar, cx| {
+                        sidebar
+                            ._subscriptions
+                            .push(cx.subscribe(&entity, Self::handle_acp_thread_event));
+                    })
+                    .ok();
+            }
+        });
+
+        subscriptions.extend([observe_server_views, observe_thread_history]);
 
         let fetch_recent_projects = {
             let picker = picker.downgrade();
@@ -709,7 +745,8 @@ impl Sidebar {
             multi_workspace,
             width: DEFAULT_WIDTH,
             picker,
-            _subscription: subscription,
+            thread_infos: HashMap::new(),
+            _subscriptions: subscriptions,
             _project_subscriptions: Vec::new(),
             _agent_panel_subscriptions: Vec::new(),
             _thread_subscriptions: Vec::new(),
@@ -908,6 +945,33 @@ impl Sidebar {
                 })
                 .detach();
             }
+        }
+    }
+
+    fn handle_acp_thread_event(
+        &mut self,
+        thread: Entity<AcpThread>,
+        event: &AcpThreadEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let session_id = thread.read(cx).session_id().clone();
+
+        match &event {
+            AcpThreadEvent::NewEntry => {
+                self.thread_infos.insert(
+                    session_id,
+                    AgentThreadInfo {
+                        title: thread.read(cx).title(),
+                        status: AgentThreadStatus::Running,
+                    },
+                );
+            }
+            AcpThreadEvent::TitleUpdated => {
+                if let Some(thread_info) = self.thread_infos.get_mut(&session_id) {
+                    thread_info.title = thread.read(cx).title();
+                }
+            }
+            _ => {}
         }
     }
 
