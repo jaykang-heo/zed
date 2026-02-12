@@ -8,18 +8,18 @@ use crate::{DevContainerConfig, devcontainer_api::DevContainerUp};
 
 /**
  * What to do, and in what order:
- * SPAWNING the dev container (this week)
+ * SPAWNING the dev container (this week/next week)
  * - Fill out the remainder of the spec (from devcontainer.json)
  * - Expand pre-defined variables
  * - Execute appropriately on Dockerfile
  * - Execute appropriately for docker-compose
  * - Add validations for semantic issues (e.g. both `image` and `Dockerfile` defined)
  * - Executing the hooks (pre-create, post-create)
- * INITIALIZING the dev container (this/next week)
+ * INITIALIZING the dev container (next week)
  * - Pulling from the known sources
  * - Expanding the template into appropriate files
  * - Adding the features to devcontainer.json as they are defined (TODO ensure you understand whether they can interoperate with Dockerfiles, etc)
- * CUSTOMIZING the dev container (next/following week)
+ * CUSTOMIZING the dev container (following week)
  * - Defining how extensions can be added
  * EASE OF USE (following week)
  * - Detect when devcontainer.json/definition is changed, offer to rebuild
@@ -51,16 +51,18 @@ pub(crate) struct DevContainer {
     privileged: Option<bool>,
     cap_add: Option<Vec<String>>,
     security_opt: Option<Vec<String>>,
-    mounts: Option<String>, // TODO the type here is weird, check spec when you get to it
+    mounts: Option<Vec<MountDefinition>>,
     features: Option<HashMap<String, FeaturePlaceholder>>, // TODO more complex object probably needed here
     override_feature_install_order: Option<Vec<String>>,
     // TODO customizations
     build: Option<ContainerBuild>,
+    #[serde(default, deserialize_with = "deserialize_string_or_int")]
     app_port: Option<String>, // TODO this could be string, int, array, so needs special care
     workspace_mount: Option<String>,
     workspace_folder: Option<String>,
     run_args: Option<Vec<String>>,
     // Docker compose stuff:
+    #[serde(default, deserialize_with = "deserialize_string_or_array")]
     docker_compose_file: Option<Vec<String>>, // TODO this can be a string or array of strings
     service: Option<String>,
     run_services: Option<Vec<String>>,
@@ -75,6 +77,53 @@ pub(crate) struct DevContainer {
     host_requirements: Option<HostRequirements>,
 }
 
+fn deserialize_string_or_array<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrArray {
+        String(String),
+        Array(Vec<String>),
+    }
+
+    match StringOrArray::deserialize(deserializer)? {
+        StringOrArray::String(s) => Ok(Some(vec![s])),
+        StringOrArray::Array(b) => Ok(Some(b)),
+    }
+}
+
+fn deserialize_string_or_int<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrInt {
+        String(String),
+        Int(u32),
+    }
+
+    match StringOrInt::deserialize(deserializer)? {
+        StringOrInt::String(s) => Ok(Some(s)),
+        StringOrInt::Int(b) => Ok(Some(b.to_string())),
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MountDefinition {
+    source: String,
+    target: String,
+    #[serde(rename = "type")]
+    mount_type: String,
+}
+
 #[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FeaturePlaceholder {} // Putting this here for now, but we should probably use DevContainerFeature
@@ -85,7 +134,6 @@ pub(crate) struct HostRequirements {
     cpus: Option<u16>,
     memory: Option<String>,
     storage: Option<String>,
-    gpu: Option<String>, // TODO complex object needed here
 }
 
 #[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -590,16 +638,21 @@ mod test {
 
     use crate::model::{
         DevContainer, DockerConfigLabels, DockerInspect, DockerInspectConfig, DockerPs,
-        FeaturePlaceholder, ForwardPort, LifecycleCommand, LifecyleScript, OnAutoForward,
-        PortAttributeProtocol, PortAttributes, RenameMeError, UserEnvProbe, create_docker_inspect,
-        create_docker_run_command, deserialize_devcontainer_json, deserialize_json_output,
-        get_remote_dir_from_config, get_remote_user_from_config,
+        FeaturePlaceholder, ForwardPort, HostRequirements, LifecycleCommand, LifecyleScript,
+        MountDefinition, OnAutoForward, PortAttributeProtocol, PortAttributes, RenameMeError,
+        ShutdownAction, UserEnvProbe, create_docker_inspect, create_docker_run_command,
+        deserialize_devcontainer_json, deserialize_json_output, get_remote_dir_from_config,
+        get_remote_user_from_config,
     };
 
     // Tests needed as I come across them
     // - portsAttributes should reference ports defined in forwardPorts
     //   - This can be either a specification (e.g. "db:5432"), a specific port (3000), or a port range (3000-5000)
     //   - So, we need to do a post-parsing validation there
+    // - overrideFeatureInstallOrder should include only featuers listed
+    // - Shutdownaction can only be none or stopContainer in the non-compose case. Can only be none or stopCompose in the compose case
+    // - (docker compose) service needs to be an actually defined service in the yml file
+    //   - Eh maybe this just becomes a runtime error that we handle appropriately
     #[test]
     fn should_deserialize_simple_devcontainer_json() {
         let given_bad_json = "{ \"image\": 123 }";
@@ -630,21 +683,19 @@ mod test {
         // wait_for (done)
         // user_env_probe: (done)
         // features (done) (for now)
-        // override_feature_install_order: Option<Vec<String>>,
-        // host_requirements: Option<HostRequirements>,
-        // // TODO customizations (part of common, not yet implemented)
-        // // TODO additional Properties?
+        // override_feature_install_order (done)
+        // host_requirements (done)
 
         // NONCOMPOSE_BASE
-        // app_port: Option<String>, // TODO this could be string, int, array, so needs special care
-        // container_env: Option<HashMap<String, String>>,
-        // container_user: Option<String>,
-        // mounts: Option<String>, // TODO the type here is weird, check spec when you get to it
-        // run_args: Option<Vec<String>>,
-        // shutdown_action: Option<ShutdownAction>,
-        // override_command: Option<bool>,
-        // workspace_folder: Option<String>,
-        // workspace_mount: Option<String>,
+        // app_port (done)
+        // container_env (done)
+        // container_user (done)
+        // mounts (done)
+        // run_args (done)
+        // shutdown_action (done)
+        // override_command (done)
+        // workspace_folder: (done)
+        // workspace_mount: (done)
 
         // DOCKERFILECONTAINER (this is complicated so needs to be subdivided)
         // build: Option<ContainerBuild>,
@@ -681,12 +732,11 @@ mod test {
         // devcontainer common + ( (composeContainer) OR (noncomposebase + (dockerfilecontainer OR imageContainer)))
         //
         // Ok so my test cases:
-        // common container -- wait how does this work? no image?
-        // common conatiner + composecontainer
-        // common container + noncomposecontainer + dockerfilecontainer
-        // common container + noncomposecontainer + imageContainer
+        // common container + composecontainer
+        // common container + noncomposebase + dockerfilecontainer
+        // common container + noncomposebase + imageContainer actually not done yet
 
-        let given_base_common_json = r#"
+        let given_image_container_json = r#"
             // These are some external comments. serde_lenient should handle them
             {
                 // These are some internal comments
@@ -742,12 +792,44 @@ mod test {
                 "features": {
               		"ghcr.io/devcontainers/features/aws-cli:1": {},
               		"ghcr.io/devcontainers/features/anaconda:1": {}
-               	}
+               	},
+                "overrideFeatureInstallOrder": [
+                    "ghcr.io/devcontainers/features/anaconda:1",
+                    "ghcr.io/devcontainers/features/aws-cli:1"
+                ],
+                "hostRequirements": {
+                    "cpus": 2,
+                    "memory": "8gb",
+                    "storage": "32gb",
+                    // Note that we're not parsing this currently
+                    "gpu": true,
+                },
+                "appPort": 8081,
+                "containerEnv": {
+                    "MYVAR3": "myvar3",
+                    "MYVAR4": "myvar4"
+                },
+                "containerUser": "myUser",
+                "mounts": [
+                    {
+                        "source": "/localfolder/app",
+                        "target": "/workspaces/app",
+                        "type": "volume"
+                    }
+                ],
+                "runArgs": [
+                    "-c",
+                    "some_command"
+                ],
+                "shutdownAction": "stopContainer",
+                "overrideCommand": true,
+                "workspaceFolder": "/workspaces",
+                "workspaceMount": "/workspaces/app"
             }
             "#;
 
         let result: Result<DevContainer, RenameMeError> =
-            deserialize_devcontainer_json(given_base_common_json);
+            deserialize_devcontainer_json(given_image_container_json);
 
         assert!(result.is_ok());
         assert_eq!(
@@ -840,6 +922,231 @@ mod test {
                         FeaturePlaceholder {}
                     )
                 ])),
+                override_feature_install_order: Some(vec![
+                    "ghcr.io/devcontainers/features/anaconda:1".to_string(),
+                    "ghcr.io/devcontainers/features/aws-cli:1".to_string()
+                ]),
+                host_requirements: Some(HostRequirements {
+                    cpus: Some(2),
+                    memory: Some("8gb".to_string()),
+                    storage: Some("32gb".to_string()),
+                }),
+                app_port: Some("8081".to_string()),
+                container_env: Some(HashMap::from([
+                    ("MYVAR3".to_string(), "myvar3".to_string()),
+                    ("MYVAR4".to_string(), "myvar4".to_string())
+                ])),
+                container_user: Some("myUser".to_string()),
+                mounts: Some(vec![MountDefinition {
+                    source: "/localfolder/app".to_string(),
+                    target: "/workspaces/app".to_string(),
+                    mount_type: "volume".to_string()
+                }]),
+                run_args: Some(vec!["-c".to_string(), "some_command".to_string()]),
+                shutdown_action: Some(ShutdownAction::StopContainer),
+                override_command: Some(true),
+                workspace_folder: Some("/workspaces".to_string()),
+                workspace_mount: Some("/workspaces/app".to_string()),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn should_deserialize_docker_compose_devcontainer_json() {
+        // COMPOSE_CONTAINER
+        // docker_compose_file (done)
+        // service (done)
+        // run_services (done)
+        // workspace_folder: Option<String>, (Note this is in non-compose base too, but just means different things in that context)
+        // shutdownAction (TODO)
+        // overrideCommand (TODO)
+
+        let given_docker_compose_json = r#"
+            // These are some external comments. serde_lenient should handle them
+            {
+                // These are some internal comments
+                "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+                "name": "myDevContainer",
+                "remoteUser": "root",
+                "forwardPorts": [
+                    "db:5432",
+                    3000
+                ],
+                "portsAttributes": {
+                    "3000": {
+                        "label": "This Port",
+                        "onAutoForward": "notify",
+                        "elevateIfNeeded": false,
+                        "requireLocalPort": true,
+                        "protocol": "https"
+                    },
+                    "db:5432": {
+                        "label": "This Port too",
+                        "onAutoForward": "silent",
+                        "elevateIfNeeded": true,
+                        "requireLocalPort": false,
+                        "protocol": "http"
+                    }
+                },
+                "otherPortsAttributes": {
+                    "label": "Other Ports",
+                    "onAutoForward": "openBrowser",
+                    "elevateIfNeeded": true,
+                    "requireLocalPort": true,
+                    "protocol": "https"
+                },
+                "updateRemoteUserUID": true,
+                "remoteEnv": {
+                    "MYVAR1": "myvarvalue",
+                    "MYVAR2": "myvarothervalue"
+                },
+                "initializeCommand": ["echo", "initialize_command"],
+                "onCreateCommand": "echo on_create_command",
+                "updateContentCommand": {
+                    "first": "echo update_content_command",
+                    "second": ["echo", "update_content_command"]
+                },
+                "postCreateCommand": ["echo", "post_create_command"],
+                "postStartCommand": "echo post_start_command",
+                "postAttachCommand": {
+                    "something": "echo post_attach_command",
+                    "something1": "echo something else",
+                },
+                "waitFor": "postStartCommand",
+                "userEnvProbe": "loginShell",
+                "features": {
+              		"ghcr.io/devcontainers/features/aws-cli:1": {},
+              		"ghcr.io/devcontainers/features/anaconda:1": {}
+               	},
+                "overrideFeatureInstallOrder": [
+                    "ghcr.io/devcontainers/features/anaconda:1",
+                    "ghcr.io/devcontainers/features/aws-cli:1"
+                ],
+                "hostRequirements": {
+                    "cpus": 2,
+                    "memory": "8gb",
+                    "storage": "32gb",
+                    // Note that we're not parsing this currently
+                    "gpu": true,
+                },
+                "dockerComposeFile": "docker-compose.yml",
+                "service": "myService",
+                "runServices": [
+                    "myService",
+                    "mySupportingService"
+                ]
+            }
+            "#;
+        let result: Result<DevContainer, RenameMeError> =
+            deserialize_devcontainer_json(given_docker_compose_json);
+
+        assert!(result.is_ok());
+        assert_eq!(
+            result.expect("ok"),
+            DevContainer {
+                image: Some(String::from("mcr.microsoft.com/devcontainers/base:ubuntu")),
+                name: Some(String::from("myDevContainer")),
+                remote_user: Some(String::from("root")),
+                forward_ports: Some(vec![
+                    ForwardPort::String("db:5432".to_string()),
+                    ForwardPort::Number(3000),
+                ]),
+                ports_attributes: Some(HashMap::from([
+                    (
+                        "3000".to_string(),
+                        PortAttributes {
+                            label: "This Port".to_string(),
+                            on_auto_forward: OnAutoForward::Notify,
+                            elevate_if_needed: false,
+                            require_local_port: true,
+                            protocol: PortAttributeProtocol::Https
+                        }
+                    ),
+                    (
+                        "db:5432".to_string(),
+                        PortAttributes {
+                            label: "This Port too".to_string(),
+                            on_auto_forward: OnAutoForward::Silent,
+                            elevate_if_needed: true,
+                            require_local_port: false,
+                            protocol: PortAttributeProtocol::Http
+                        }
+                    )
+                ])),
+                other_ports_attributes: Some(PortAttributes {
+                    label: "Other Ports".to_string(),
+                    on_auto_forward: OnAutoForward::OpenBrowser,
+                    elevate_if_needed: true,
+                    require_local_port: true,
+                    protocol: PortAttributeProtocol::Https
+                }),
+                update_remote_user_uid: Some(true),
+                remote_env: Some(HashMap::from([
+                    ("MYVAR1".to_string(), "myvarvalue".to_string()),
+                    ("MYVAR2".to_string(), "myvarothervalue".to_string())
+                ])),
+                initialize_command: Some(LifecyleScript::from_args(vec![
+                    "echo".to_string(),
+                    "initialize_command".to_string()
+                ])),
+                on_create_command: Some(LifecyleScript::from_str("echo on_create_command")),
+                update_content_command: Some(LifecyleScript::from_map(HashMap::from([
+                    (
+                        "first".to_string(),
+                        vec!["echo".to_string(), "update_content_command".to_string()]
+                    ),
+                    (
+                        "second".to_string(),
+                        vec!["echo".to_string(), "update_content_command".to_string()]
+                    )
+                ]))),
+                post_create_command: Some(LifecyleScript::from_str("echo post_create_command")),
+                post_start_command: Some(LifecyleScript::from_args(vec![
+                    "echo".to_string(),
+                    "post_start_command".to_string()
+                ])),
+                post_attach_command: Some(LifecyleScript::from_map(HashMap::from([
+                    (
+                        "something".to_string(),
+                        vec!["echo".to_string(), "post_attach_command".to_string()]
+                    ),
+                    (
+                        "something1".to_string(),
+                        vec![
+                            "echo".to_string(),
+                            "something".to_string(),
+                            "else".to_string()
+                        ]
+                    )
+                ]))),
+                wait_for: Some(LifecycleCommand::PostStartCommand),
+                user_env_probe: Some(UserEnvProbe::LoginShell),
+                features: Some(HashMap::from([
+                    (
+                        "ghcr.io/devcontainers/features/aws-cli:1".to_string(),
+                        FeaturePlaceholder {}
+                    ),
+                    (
+                        "ghcr.io/devcontainers/features/anaconda:1".to_string(),
+                        FeaturePlaceholder {}
+                    )
+                ])),
+                override_feature_install_order: Some(vec![
+                    "ghcr.io/devcontainers/features/anaconda:1".to_string(),
+                    "ghcr.io/devcontainers/features/aws-cli:1".to_string()
+                ]),
+                host_requirements: Some(HostRequirements {
+                    cpus: Some(2),
+                    memory: Some("8gb".to_string()),
+                    storage: Some("32gb".to_string()),
+                }),
+                docker_compose_file: Some(vec!["docker-compose.yml".to_string()]),
+                service: Some("myService".to_string()),
+                run_services: Some(vec![
+                    "myService".to_string(),
+                    "mySupportingService".to_string(),
+                ]),
                 ..Default::default()
             }
         );
