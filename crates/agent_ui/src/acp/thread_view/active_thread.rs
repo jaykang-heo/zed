@@ -7200,18 +7200,38 @@ impl Render for AcpThreadView {
                 }
             }))
             .on_action(cx.listener(|this, _: &workspace::GoBack, window, cx| {
-                this.server_view
-                    .update(cx, |view, cx| {
-                        view.go_back(window, cx);
-                    })
-                    .ok();
+                let navigated = this
+                    .server_view
+                    .update(cx, |view, cx| view.go_back(window, cx))
+                    .unwrap_or(false);
+                if !navigated {
+                    if let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() {
+                        cx.defer_in(window, move |_, _window, cx| {
+                            handle
+                                .update(cx, |multi_workspace, window, cx| {
+                                    multi_workspace.go_back_workspace(window, cx);
+                                })
+                                .log_err();
+                        });
+                    }
+                }
             }))
             .on_action(cx.listener(|this, _: &workspace::GoForward, window, cx| {
-                this.server_view
-                    .update(cx, |view, cx| {
-                        view.go_forward(window, cx);
-                    })
-                    .ok();
+                let navigated = this
+                    .server_view
+                    .update(cx, |view, cx| view.go_forward(window, cx))
+                    .unwrap_or(false);
+                if !navigated {
+                    if let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() {
+                        cx.defer_in(window, move |_, _window, cx| {
+                            handle
+                                .update(cx, |multi_workspace, window, cx| {
+                                    multi_workspace.go_forward_workspace(window, cx);
+                                })
+                                .log_err();
+                        });
+                    }
+                }
             }))
             .on_action(cx.listener(Self::keep_all))
             .on_action(cx.listener(Self::reject_all))

@@ -95,6 +95,8 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
 pub struct MultiWorkspace {
     workspaces: Vec<Entity<Workspace>>,
     active_workspace_index: usize,
+    workspace_backward_stack: Vec<usize>,
+    workspace_forward_stack: Vec<usize>,
     sidebar: Option<Box<dyn SidebarHandle>>,
     sidebar_open: bool,
     _sidebar_subscription: Option<Subscription>,
@@ -105,6 +107,8 @@ impl MultiWorkspace {
         Self {
             workspaces: vec![workspace],
             active_workspace_index: 0,
+            workspace_backward_stack: Vec::new(),
+            workspace_forward_stack: Vec::new(),
             sidebar: None,
             sidebar_open: false,
             _sidebar_subscription: None,
@@ -238,6 +242,9 @@ impl MultiWorkspace {
 
         let index = self.add_workspace(workspace, cx);
         if self.active_workspace_index != index {
+            self.workspace_backward_stack
+                .push(self.active_workspace_index);
+            self.workspace_forward_stack.clear();
             self.active_workspace_index = index;
             cx.notify();
         }
@@ -265,10 +272,45 @@ impl MultiWorkspace {
             index < self.workspaces.len(),
             "workspace index out of bounds"
         );
+        if self.active_workspace_index != index {
+            self.workspace_backward_stack
+                .push(self.active_workspace_index);
+            self.workspace_forward_stack.clear();
+        }
         self.active_workspace_index = index;
         self.serialize(window, cx);
         self.focus_active_workspace(window, cx);
         cx.notify();
+    }
+
+    pub fn go_back_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(prev_index) = self.workspace_backward_stack.pop() {
+            if prev_index < self.workspaces.len() {
+                self.workspace_forward_stack
+                    .push(self.active_workspace_index);
+                self.active_workspace_index = prev_index;
+                self.serialize(window, cx);
+                self.focus_active_workspace(window, cx);
+                cx.notify();
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn go_forward_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(next_index) = self.workspace_forward_stack.pop() {
+            if next_index < self.workspaces.len() {
+                self.workspace_backward_stack
+                    .push(self.active_workspace_index);
+                self.active_workspace_index = next_index;
+                self.serialize(window, cx);
+                self.focus_active_workspace(window, cx);
+                cx.notify();
+                return true;
+            }
+        }
+        false
     }
 
     pub fn activate_next_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -580,5 +622,200 @@ impl Render for MultiWorkspace {
                 ..Tiling::default()
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs::FakeFs;
+    use gpui::TestAppContext;
+    use project::Project;
+    use settings::SettingsStore;
+
+    fn init_test(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            cx.update_flags(true, vec!["agent-v2".to_string()]);
+            theme::init(theme::LoadThemes::JustBase, cx);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_workspace_back_forward_navigation(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        let project_a = Project::test(fs.clone(), None, cx).await;
+        let project_b = Project::test(fs.clone(), None, cx).await;
+        let project_c = Project::test(fs.clone(), None, cx).await;
+
+        let (multi_workspace, cx) = cx
+            .add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+
+        // Add two more workspaces (B at index 1, C at index 2).
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.test_add_workspace(project_b.clone(), window, cx);
+            mw.test_add_workspace(project_c.clone(), window, cx);
+        });
+
+        // Active is workspace C (index 2) after test_add_workspace calls activate.
+        multi_workspace.read_with(cx, |mw, _| {
+            assert_eq!(mw.active_workspace_index(), 2);
+        });
+
+        // Navigate: activate workspace A (index 0).
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.activate_index(0, window, cx);
+        });
+        multi_workspace.read_with(cx, |mw, _| {
+            assert_eq!(mw.active_workspace_index(), 0);
+        });
+
+        // Go back: should return to C (index 2).
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            assert!(mw.go_back_workspace(window, cx));
+        });
+        multi_workspace.read_with(cx, |mw, _| {
+            assert_eq!(mw.active_workspace_index(), 2);
+        });
+
+        // Go back: should return to B (index 1), since activate pushed A→B→C.
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            assert!(mw.go_back_workspace(window, cx));
+        });
+        multi_workspace.read_with(cx, |mw, _| {
+            assert_eq!(mw.active_workspace_index(), 1);
+        });
+
+        // Go back: should return to A (index 0).
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            assert!(mw.go_back_workspace(window, cx));
+        });
+        multi_workspace.read_with(cx, |mw, _| {
+            assert_eq!(mw.active_workspace_index(), 0);
+        });
+
+        // Go back with empty stack returns false.
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            assert!(!mw.go_back_workspace(window, cx));
+        });
+        multi_workspace.read_with(cx, |mw, _| {
+            assert_eq!(mw.active_workspace_index(), 0);
+        });
+
+        // Go forward: A -> B (index 1).
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            assert!(mw.go_forward_workspace(window, cx));
+        });
+        multi_workspace.read_with(cx, |mw, _| {
+            assert_eq!(mw.active_workspace_index(), 1);
+        });
+
+        // Go forward: B -> C (index 2).
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            assert!(mw.go_forward_workspace(window, cx));
+        });
+        multi_workspace.read_with(cx, |mw, _| {
+            assert_eq!(mw.active_workspace_index(), 2);
+        });
+
+        // Go forward: C -> A (index 0).
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            assert!(mw.go_forward_workspace(window, cx));
+        });
+        multi_workspace.read_with(cx, |mw, _| {
+            assert_eq!(mw.active_workspace_index(), 0);
+        });
+
+        // Go forward with empty stack returns false.
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            assert!(!mw.go_forward_workspace(window, cx));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_workspace_navigate_clears_forward_stack(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        let project_a = Project::test(fs.clone(), None, cx).await;
+        let project_b = Project::test(fs.clone(), None, cx).await;
+        let project_c = Project::test(fs.clone(), None, cx).await;
+
+        let (multi_workspace, cx) = cx
+            .add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.test_add_workspace(project_b.clone(), window, cx);
+            mw.test_add_workspace(project_c.clone(), window, cx);
+        });
+
+        // History from test_add_workspace: activate pushed [0, 1].
+        // Active is 2 (C).
+
+        // Go back to B (index 1).
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            assert!(mw.go_back_workspace(window, cx));
+        });
+        multi_workspace.read_with(cx, |mw, _| {
+            assert_eq!(mw.active_workspace_index(), 1);
+        });
+
+        // Now navigate directly to A (index 0) — should clear the forward stack.
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.activate_index(0, window, cx);
+        });
+
+        // Forward stack was cleared, so go_forward should fail.
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            assert!(!mw.go_forward_workspace(window, cx));
+        });
+        multi_workspace.read_with(cx, |mw, _| {
+            assert_eq!(mw.active_workspace_index(), 0);
+        });
+
+        // But backward stack should have B (index 1).
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            assert!(mw.go_back_workspace(window, cx));
+        });
+        multi_workspace.read_with(cx, |mw, _| {
+            assert_eq!(mw.active_workspace_index(), 1);
+        });
+    }
+
+    #[gpui::test]
+    async fn test_workspace_activate_same_index_does_not_push_history(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        let project_a = Project::test(fs.clone(), None, cx).await;
+        let project_b = Project::test(fs.clone(), None, cx).await;
+
+        let (multi_workspace, cx) = cx
+            .add_window_view(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.test_add_workspace(project_b.clone(), window, cx);
+        });
+
+        // Active is B (index 1). Activating index 1 again should not push history.
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            mw.activate_index(1, window, cx);
+        });
+
+        // Go back should return to A (index 0), not to B again.
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            assert!(mw.go_back_workspace(window, cx));
+        });
+        multi_workspace.read_with(cx, |mw, _| {
+            assert_eq!(mw.active_workspace_index(), 0);
+        });
+
+        // No more history.
+        multi_workspace.update_in(cx, |mw, window, cx| {
+            assert!(!mw.go_back_workspace(window, cx));
+        });
     }
 }

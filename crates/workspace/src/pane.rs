@@ -1,6 +1,6 @@
 use crate::{
-    CloseWindow, NewFile, NewTerminal, OpenInTerminal, OpenOptions, OpenTerminal, OpenVisible,
-    SplitDirection, ToggleFileFinder, ToggleProjectSymbols, ToggleZoom, Workspace,
+    CloseWindow, MultiWorkspace, NewFile, NewTerminal, OpenInTerminal, OpenOptions, OpenTerminal,
+    OpenVisible, SplitDirection, ToggleFileFinder, ToggleProjectSymbols, ToggleZoom, Workspace,
     WorkspaceItemBuilder, ZoomIn, ZoomOut,
     invalid_item_view::InvalidItemView,
     item::{
@@ -903,26 +903,46 @@ impl Pane {
     }
 
     pub fn navigate_backward(&mut self, _: &GoBack, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(workspace) = self.workspace.upgrade() {
-            let pane = cx.entity().downgrade();
-            window.defer(cx, move |window, cx| {
-                workspace.update(cx, |workspace, cx| {
-                    workspace.go_back(pane, window, cx).detach_and_log_err(cx)
+        if self.can_navigate_backward() {
+            if let Some(workspace) = self.workspace.upgrade() {
+                let pane = cx.entity().downgrade();
+                window.defer(cx, move |window, cx| {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.go_back(pane, window, cx).detach_and_log_err(cx)
+                    })
                 })
-            })
+            }
+        } else if let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() {
+            cx.defer_in(window, move |_, _window, cx| {
+                handle
+                    .update(cx, |multi_workspace, window, cx| {
+                        multi_workspace.go_back_workspace(window, cx);
+                    })
+                    .log_err();
+            });
         }
     }
 
     fn navigate_forward(&mut self, _: &GoForward, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(workspace) = self.workspace.upgrade() {
-            let pane = cx.entity().downgrade();
-            window.defer(cx, move |window, cx| {
-                workspace.update(cx, |workspace, cx| {
-                    workspace
-                        .go_forward(pane, window, cx)
-                        .detach_and_log_err(cx)
+        if self.can_navigate_forward() {
+            if let Some(workspace) = self.workspace.upgrade() {
+                let pane = cx.entity().downgrade();
+                window.defer(cx, move |window, cx| {
+                    workspace.update(cx, |workspace, cx| {
+                        workspace
+                            .go_forward(pane, window, cx)
+                            .detach_and_log_err(cx)
+                    })
                 })
-            })
+            }
+        } else if let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() {
+            cx.defer_in(window, move |_, _window, cx| {
+                handle
+                    .update(cx, |multi_workspace, window, cx| {
+                        multi_workspace.go_forward_workspace(window, cx);
+                    })
+                    .log_err();
+            });
         }
     }
 
