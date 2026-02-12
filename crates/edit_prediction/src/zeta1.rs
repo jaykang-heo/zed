@@ -273,6 +273,7 @@ fn process_completion_response(
             &snapshot,
             edits,
             None,
+            Vec::new(),
             buffer_snapshotted_at,
             received_response_at,
             inputs,

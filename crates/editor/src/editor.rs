@@ -640,6 +640,9 @@ enum EditPrediction {
         /// The anchor is in multibuffer coordinates; after applying edits,
         /// resolve the anchor and add the offset to get the final cursor position.
         cursor_position: Option<(Anchor, usize)>,
+        /// Tabstop selections as (start_anchor, start_offset, end_anchor, end_offset).
+        /// These represent uncertain regions the user can Tab through after accepting.
+        tabstop_selections: Vec<(Anchor, usize, Anchor, usize)>,
         edit_preview: Option<EditPreview>,
         display_mode: EditDisplayMode,
         snapshot: BufferSnapshot,
@@ -7977,6 +7980,7 @@ impl Editor {
             EditPrediction::Edit {
                 edits,
                 cursor_position,
+                tabstop_selections,
                 ..
             } => {
                 self.report_edit_prediction_event(
@@ -8016,9 +8020,64 @@ impl Editor {
                             fallback_cursor_target
                         };
 
-                        self.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
-                            s.select_anchor_ranges([cursor_target..cursor_target]);
-                        });
+                        // Build tabstop ranges from the predicted selections
+                        let tabstop_ranges: Vec<Vec<Range<Anchor>>> =
+                            if tabstop_selections.is_empty() {
+                                Vec::new()
+                            } else {
+                                let snapshot = self.buffer.read(cx).snapshot(cx);
+                                tabstop_selections
+                                    .iter()
+                                    .map(|(start_anchor, start_offset, end_anchor, end_offset)| {
+                                        let start_base = start_anchor.to_offset(&snapshot).0;
+                                        let start_pos = MultiBufferOffset(
+                                            (start_base + start_offset).min(snapshot.len().0),
+                                        );
+                                        let end_base = end_anchor.to_offset(&snapshot).0;
+                                        let end_pos = MultiBufferOffset(
+                                            (end_base + end_offset).min(snapshot.len().0),
+                                        );
+                                        let start = snapshot.anchor_after(start_pos);
+                                        let end = snapshot.anchor_before(end_pos);
+                                        vec![start..end]
+                                    })
+                                    .collect()
+                            };
+
+                        // If we have tabstops, select the first one; otherwise use cursor_target
+                        if let Some(first_tabstop) = tabstop_ranges.first() {
+                            self.change_selections(
+                                SelectionEffects::no_scroll(),
+                                window,
+                                cx,
+                                |s| {
+                                    s.select_ranges(first_tabstop.iter().rev().cloned());
+                                },
+                            );
+
+                            // Push snippet state for Tab/Shift-Tab navigation
+                            let has_non_empty_tabstop = {
+                                let snapshot = self.buffer.read(cx).snapshot(cx);
+                                let range = &tabstop_ranges[0][0];
+                                range.start.to_offset(&snapshot) != range.end.to_offset(&snapshot)
+                            };
+                            if tabstop_ranges.len() > 1 || has_non_empty_tabstop {
+                                self.snippet_stack.push(SnippetState {
+                                    active_index: 0,
+                                    ranges: tabstop_ranges,
+                                    choices: Vec::new(),
+                                });
+                            }
+                        } else {
+                            self.change_selections(
+                                SelectionEffects::no_scroll(),
+                                window,
+                                cx,
+                                |s| {
+                                    s.select_anchor_ranges([cursor_target..cursor_target]);
+                                },
+                            );
+                        }
 
                         let selections = self.selections.disjoint_anchors_arc();
                         if let Some(transaction_id_now) =
@@ -8481,14 +8540,20 @@ impl Editor {
 
         let edit_prediction = provider.suggest(&buffer, cursor_buffer_position, cx)?;
 
-        let (completion_id, edits, predicted_cursor_position, edit_preview) = match edit_prediction
-        {
+        let (
+            completion_id,
+            edits,
+            predicted_cursor_position,
+            predicted_tabstop_selections,
+            edit_preview,
+        ) = match edit_prediction {
             edit_prediction_types::EditPrediction::Local {
                 id,
                 edits,
                 cursor_position,
+                tabstop_selections,
                 edit_preview,
-            } => (id, edits, cursor_position, edit_preview),
+            } => (id, edits, cursor_position, tabstop_selections, edit_preview),
             edit_prediction_types::EditPrediction::Jump {
                 id,
                 snapshot,
@@ -8526,6 +8591,21 @@ impl Editor {
             let anchor = multibuffer.anchor_in_excerpt(excerpt_id, predicted.anchor)?;
             Some((anchor, predicted.offset))
         });
+
+        let tabstop_selections: Vec<(Anchor, usize, Anchor, usize)> = predicted_tabstop_selections
+            .into_iter()
+            .filter_map(|selection| {
+                let start_anchor =
+                    multibuffer.anchor_in_excerpt(excerpt_id, selection.start.anchor)?;
+                let end_anchor = multibuffer.anchor_in_excerpt(excerpt_id, selection.end.anchor)?;
+                Some((
+                    start_anchor,
+                    selection.start.offset,
+                    end_anchor,
+                    selection.end.offset,
+                ))
+            })
+            .collect();
 
         let first_edit_start = edits.first().unwrap().0.start;
         let first_edit_start_point = first_edit_start.to_point(&multibuffer);
@@ -8623,6 +8703,7 @@ impl Editor {
             EditPrediction::Edit {
                 edits,
                 cursor_position,
+                tabstop_selections,
                 edit_preview,
                 display_mode,
                 snapshot,

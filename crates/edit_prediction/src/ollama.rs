@@ -293,6 +293,7 @@ impl Ollama {
                     &output.snapshot,
                     output.edits.into(),
                     None,
+                    Vec::new(),
                     output.buffer_snapshotted_at,
                     output.response_received_at,
                     output.inputs,
