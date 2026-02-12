@@ -1,11 +1,8 @@
 use mach2::exception_types::{
     EXC_MASK_ALL, EXCEPTION_DEFAULT, exception_behavior_t, exception_mask_t,
 };
-use mach2::kern_return::{KERN_SUCCESS, kern_return_t};
-use mach2::mach_types::task_t;
 use mach2::port::{MACH_PORT_NULL, mach_port_t};
 use mach2::thread_status::{THREAD_STATE_NONE, thread_state_flavor_t};
-use mach2::traps::mach_task_self;
 use smol::Unblock;
 use std::ffi::{CString, OsStr, OsString};
 use std::io;
@@ -17,14 +14,6 @@ use std::process::{ExitStatus, Output, Stdio};
 use std::ptr;
 
 unsafe extern "C" {
-    fn task_set_exception_ports(
-        task: task_t,
-        exception_mask: exception_mask_t,
-        new_port: mach_port_t,
-        behavior: exception_behavior_t,
-        new_flavor: thread_state_flavor_t,
-    ) -> kern_return_t;
-
     fn posix_spawnattr_setexceptionports_np(
         attr: *mut libc::posix_spawnattr_t,
         mask: exception_mask_t,
@@ -46,26 +35,7 @@ unsafe extern "C" {
     static environ: *const *mut libc::c_char;
 }
 
-pub fn reset_exception_ports() {
-    unsafe {
-        let task = mach_task_self();
-        let kr = task_set_exception_ports(
-            task,
-            EXC_MASK_ALL,
-            MACH_PORT_NULL,
-            EXCEPTION_DEFAULT as exception_behavior_t,
-            THREAD_STATE_NONE,
-        );
-
-        if kr != KERN_SUCCESS {
-            eprintln!(
-                "Warning: failed to reset exception ports in child process (kern_return: {})",
-                kr
-            );
-        }
-    }
-}
-
+#[derive(Debug)]
 pub struct Command {
     program: OsString,
     args: Vec<OsString>,
@@ -208,6 +178,7 @@ impl Command {
     }
 }
 
+#[derive(Debug)]
 pub struct Child {
     pid: libc::pid_t,
     pub stdin: Option<Unblock<std::fs::File>>,
@@ -258,27 +229,30 @@ impl Child {
         }
     }
 
-    pub async fn status(&mut self) -> io::Result<ExitStatus> {
-        drop(self.stdin.take());
-
-        if let Some(status) = self.status {
-            return Ok(status);
-        }
+    pub fn status(
+        &mut self,
+    ) -> impl std::future::Future<Output = io::Result<ExitStatus>> + Send + 'static {
+        self.stdin.take();
 
         let pid = self.pid;
-        let status = smol::unblock(move || {
-            let mut status: libc::c_int = 0;
-            let result = unsafe { libc::waitpid(pid, &mut status, 0) };
-            if result == -1 {
-                Err(io::Error::last_os_error())
-            } else {
-                Ok(ExitStatus::from_raw(status))
-            }
-        })
-        .await?;
+        let cached_status = self.status;
 
-        self.status = Some(status);
-        Ok(status)
+        async move {
+            if let Some(status) = cached_status {
+                return Ok(status);
+            }
+
+            smol::unblock(move || {
+                let mut status: libc::c_int = 0;
+                let result = unsafe { libc::waitpid(pid, &mut status, 0) };
+                if result == -1 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(ExitStatus::from_raw(status))
+                }
+            })
+            .await
+        }
     }
 
     pub async fn output(mut self) -> io::Result<Output> {

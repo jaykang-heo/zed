@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use smol::{io::AsyncReadExt, process::Stdio};
 use std::time::Duration;
 use task::{BuildTaskDefinition, DebugScenario, ShellBuilder, SpawnInTerminal, TaskTemplate};
-use util::command::new_smol_command;
+use util::command::new_command;
 
 pub(crate) struct CargoLocator;
 
@@ -19,7 +19,7 @@ async fn find_best_executable(
         return executables.first().cloned();
     }
     for executable in executables {
-        let Some(mut child) = new_smol_command(&executable)
+        let Some(mut child) = new_command(&executable)
             .arg("--list")
             .stdout(Stdio::piped())
             .spawn()

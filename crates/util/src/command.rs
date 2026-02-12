@@ -4,7 +4,7 @@ use std::ffi::OsStr;
 mod darwin;
 
 #[cfg(target_os = "macos")]
-pub use darwin::{Child, Command, reset_exception_ports};
+pub use darwin::{Child, Command};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000_u32;
@@ -27,39 +27,11 @@ pub fn new_std_command(program: impl AsRef<OsStr>) -> std::process::Command {
     std::process::Command::new(program)
 }
 
-#[deprecated(note = "use `new_command` instead")]
-pub fn new_smol_command(program: impl AsRef<OsStr>) -> smol::process::Command {
-    #[cfg(target_os = "windows")]
-    {
-        use smol::process::windows::CommandExt;
-        let mut cmd = smol::process::Command::new(program);
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        cmd
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::process::CommandExt;
-        let mut std_cmd = std::process::Command::new(program);
-        unsafe {
-            std_cmd.pre_exec(|| {
-                darwin::reset_exception_ports();
-                Ok(())
-            });
-        }
-        smol::process::Command::from(std_cmd)
-    }
-
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        smol::process::Command::new(program)
-    }
-}
-
 #[cfg(not(target_os = "macos"))]
 pub type Child = smol::process::Child;
 
 #[cfg(not(target_os = "macos"))]
+#[derive(Debug)]
 #[repr(transparent)]
 pub struct Command(smol::process::Command);
 

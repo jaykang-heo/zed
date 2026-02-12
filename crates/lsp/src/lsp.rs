@@ -22,8 +22,8 @@ use serde_json::{Value, json, value::RawValue};
 use smol::{
     channel,
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::Child,
 };
+use util::command::Child;
 
 use std::{
     any::TypeId,
@@ -418,7 +418,7 @@ impl LanguageServer {
             working_dir,
             &binary.arguments
         );
-        let mut command = util::command::new_smol_command(&binary.path);
+        let mut command = util::command::new_command(&binary.path);
         command
             .current_dir(working_dir)
             .args(&binary.arguments)
