@@ -3284,7 +3284,7 @@ impl AcpThreadView {
         entry_ix: usize,
         total_entries: usize,
         entry: &AgentThreadEntry,
-        window: &mut Window,
+        window: &Window,
         cx: &Context<Self>,
     ) -> AnyElement {
         let is_indented = entry.is_indented();
@@ -5928,18 +5928,9 @@ impl AcpThreadView {
                 .into_any_element()
         });
 
-        let has_expandable_content = thread.as_ref().map_or(false, |thread| {
-            thread.read(cx).entries().iter().rev().any(|entry| {
-                if let AgentThreadEntry::AssistantMessage(msg) = entry {
-                    msg.chunks.iter().any(|chunk| match chunk {
-                        AssistantMessageChunk::Message { block } => block.markdown().is_some(),
-                        AssistantMessageChunk::Thought { block } => block.markdown().is_some(),
-                    })
-                } else {
-                    false
-                }
-            })
-        });
+        let has_expandable_content = thread
+            .as_ref()
+            .map_or(false, |thread| !thread.read(cx).entries().is_empty());
 
         v_flex()
             .w_full()
@@ -6073,11 +6064,13 @@ impl AcpThreadView {
             .when_some(thread_view, |this, thread_view| {
                 let thread = &thread_view.read(cx).thread;
                 this.when(is_expanded, |this| {
-                    this.child(
-                        self.render_subagent_expanded_content(
-                            entry_ix, context_ix, thread, window, cx,
-                        ),
-                    )
+                    this.child(self.render_subagent_expanded_content(
+                        entry_ix,
+                        context_ix,
+                        thread_view,
+                        window,
+                        cx,
+                    ))
                 })
                 .children(
                     thread
@@ -6109,25 +6102,28 @@ impl AcpThreadView {
         &self,
         _entry_ix: usize,
         _context_ix: usize,
-        thread: &Entity<AcpThread>,
+        thread_view: &Entity<AcpThreadView>,
         window: &Window,
         cx: &Context<Self>,
     ) -> impl IntoElement {
-        let thread_read = thread.read(cx);
-        let session_id = thread_read.session_id().clone();
-        let entries = thread_read.entries();
+        const MAX_PREVIEW_ENTRIES: usize = 8;
 
-        // Find the most recent agent message with any content (message or thought)
-        let last_assistant_markdown = entries.iter().rev().find_map(|entry| {
-            if let AgentThreadEntry::AssistantMessage(msg) = entry {
-                msg.chunks.iter().find_map(|chunk| match chunk {
-                    AssistantMessageChunk::Message { block } => block.markdown().cloned(),
-                    AssistantMessageChunk::Thought { block } => block.markdown().cloned(),
-                })
-            } else {
-                None
-            }
-        });
+        let subagent_view = thread_view.read(cx);
+        let session_id = subagent_view.thread.read(cx).session_id().clone();
+        let entries = subagent_view.thread.read(cx).entries();
+        let total_entries = entries.len();
+        let start_ix = total_entries.saturating_sub(MAX_PREVIEW_ENTRIES);
+
+        let rendered_entries: Vec<AnyElement> = entries[start_ix..]
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                let actual_ix = start_ix + i;
+                // Pass total_entries + 1 to prevent "last entry" special behavior
+                // (thread controls, feedback editor, etc.) in the preview.
+                subagent_view.render_entry(actual_ix, total_entries + 1, entry, window, cx)
+            })
+            .collect();
 
         let scroll_handle = self
             .subagent_scroll_handles
@@ -6139,20 +6135,22 @@ impl AcpThreadView {
         scroll_handle.scroll_to_bottom();
         let editor_bg = cx.theme().colors().editor_background;
 
-        let gradient_overlay = {
-            div().absolute().inset_0().bg(linear_gradient(
-                180.,
-                linear_color_stop(editor_bg, 0.),
-                linear_color_stop(editor_bg.opacity(0.), 0.15),
-            ))
-        };
+        let gradient_overlay = div().absolute().inset_0().bg(linear_gradient(
+            180.,
+            linear_color_stop(editor_bg, 0.),
+            linear_color_stop(editor_bg.opacity(0.), 0.15),
+        ));
+
+        let interaction_blocker = div()
+            .absolute()
+            .inset_0()
+            .size_full()
+            .block_mouse_except_scroll();
 
         div()
             .relative()
             .w_full()
-            .max_h_56()
-            .p_2p5()
-            .text_ui(cx)
+            .h_56()
             .border_t_1()
             .border_color(self.tool_card_border_color(cx))
             .bg(editor_bg.opacity(0.4))
@@ -6162,14 +6160,10 @@ impl AcpThreadView {
                     .id(format!("subagent-content-{}", session_id))
                     .size_full()
                     .track_scroll(&scroll_handle)
-                    .when_some(last_assistant_markdown, |this, markdown| {
-                        this.child(self.render_markdown(
-                            markdown,
-                            MarkdownStyle::themed(MarkdownFont::Agent, window, cx),
-                        ))
-                    }),
+                    .children(rendered_entries),
             )
             .child(gradient_overlay)
+            .child(interaction_blocker)
     }
 
     fn render_subagent_pending_tool_call(
