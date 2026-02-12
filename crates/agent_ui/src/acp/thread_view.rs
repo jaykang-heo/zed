@@ -239,6 +239,34 @@ impl AcpServerView {
         }
         cx.notify();
     }
+
+    pub fn go_back(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(connected) = self.as_connected_mut() else {
+            return false;
+        };
+        let navigated = connected.go_back_session();
+        if navigated {
+            if let Some(view) = self.active_thread() {
+                view.focus_handle(cx).focus(window, cx);
+            }
+            cx.notify();
+        }
+        navigated
+    }
+
+    pub fn go_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(connected) = self.as_connected_mut() else {
+            return false;
+        };
+        let navigated = connected.go_forward_session();
+        if navigated {
+            if let Some(view) = self.active_thread() {
+                view.focus_handle(cx).focus(window, cx);
+            }
+            cx.notify();
+        }
+        navigated
+    }
 }
 
 enum ServerState {
@@ -252,6 +280,8 @@ enum ServerState {
 pub struct ConnectedServerState {
     auth_state: AuthState,
     active_id: Option<acp::SessionId>,
+    session_backward_stack: Vec<acp::SessionId>,
+    session_forward_stack: Vec<acp::SessionId>,
     threads: HashMap<acp::SessionId, Entity<AcpThreadView>>,
     connection: Rc<dyn AgentConnection>,
 }
@@ -290,7 +320,35 @@ impl ConnectedServerState {
 
     pub fn navigate_to_session(&mut self, session_id: acp::SessionId) {
         if self.threads.contains_key(&session_id) {
+            if let Some(current_id) = &self.active_id {
+                if *current_id != session_id {
+                    self.session_backward_stack.push(current_id.clone());
+                    self.session_forward_stack.clear();
+                }
+            }
             self.active_id = Some(session_id);
+        }
+    }
+
+    pub fn go_back_session(&mut self) -> bool {
+        if let Some(prev_id) = self.session_backward_stack.pop() {
+            if let Some(current_id) = self.active_id.replace(prev_id) {
+                self.session_forward_stack.push(current_id);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn go_forward_session(&mut self) -> bool {
+        if let Some(next_id) = self.session_forward_stack.pop() {
+            if let Some(current_id) = self.active_id.replace(next_id) {
+                self.session_backward_stack.push(current_id);
+            }
+            true
+        } else {
+            false
         }
     }
 
@@ -571,6 +629,8 @@ impl AcpServerView {
                                 connection,
                                 auth_state: AuthState::Ok,
                                 active_id: Some(id.clone()),
+                                session_backward_stack: Vec::new(),
+                                session_forward_stack: Vec::new(),
                                 threads: HashMap::from_iter([(id, current)]),
                             }),
                             cx,
@@ -880,6 +940,8 @@ impl AcpServerView {
                     ServerState::Connected(ConnectedServerState {
                         auth_state,
                         active_id: None,
+                        session_backward_stack: Vec::new(),
+                        session_forward_stack: Vec::new(),
                         threads: HashMap::default(),
                         connection,
                     }),
@@ -2596,6 +2658,213 @@ pub(crate) mod tests {
         let weak_view = thread_view.downgrade();
         drop(thread_view);
         assert!(!weak_view.is_upgradable());
+    }
+
+    #[gpui::test]
+    async fn test_session_back_forward_navigation(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (server_view, cx) = setup_thread_view(StubAgentServer::default_response(), cx).await;
+
+        // Get the initial session ID (Thread A).
+        let session_a = server_view.read_with(cx, |view, cx| {
+            view.active_thread()
+                .expect("should have active thread")
+                .read(cx)
+                .id
+                .clone()
+        });
+
+        // Create two more threads (B and C) and register them in the connected state.
+        let session_b = SessionId::from("session-b");
+        let session_c = SessionId::from("session-c");
+
+        server_view.update_in(cx, |view, window, cx| {
+            let connected = view.as_connected().expect("should be connected");
+            let connection = connected.connection.clone();
+            let project = view.project.clone();
+
+            let action_log_b = cx.new(|_| ActionLog::new(project.clone()));
+            let thread_b = cx.new(|cx| {
+                AcpThread::new(
+                    None,
+                    "Thread B",
+                    connection.clone(),
+                    project.clone(),
+                    action_log_b,
+                    session_b.clone(),
+                    watch::Receiver::constant(acp::PromptCapabilities::new()),
+                    cx,
+                )
+            });
+            let view_b = view.new_thread_view(None, thread_b, false, None, None, window, cx);
+
+            let action_log_c = cx.new(|_| ActionLog::new(project.clone()));
+            let thread_c = cx.new(|cx| {
+                AcpThread::new(
+                    None,
+                    "Thread C",
+                    connection.clone(),
+                    project.clone(),
+                    action_log_c,
+                    session_c.clone(),
+                    watch::Receiver::constant(acp::PromptCapabilities::new()),
+                    cx,
+                )
+            });
+            let view_c = view.new_thread_view(None, thread_c, false, None, None, window, cx);
+
+            let connected = view.as_connected_mut().expect("should be connected");
+            connected.threads.insert(session_b.clone(), view_b);
+            connected.threads.insert(session_c.clone(), view_c);
+        });
+
+        // Navigate: A -> B -> C
+        server_view.update_in(cx, |view, window, cx| {
+            view.navigate_to_session(session_b.clone(), window, cx);
+        });
+        server_view.update_in(cx, |view, window, cx| {
+            view.navigate_to_session(session_c.clone(), window, cx);
+        });
+
+        // Active should be C.
+        server_view.read_with(cx, |view, cx| {
+            assert_eq!(view.active_thread().unwrap().read(cx).id, session_c);
+        });
+
+        // Go back: C -> B
+        server_view.update_in(cx, |view, window, cx| {
+            assert!(view.go_back(window, cx));
+        });
+        server_view.read_with(cx, |view, cx| {
+            assert_eq!(view.active_thread().unwrap().read(cx).id, session_b);
+        });
+
+        // Go back: B -> A
+        server_view.update_in(cx, |view, window, cx| {
+            assert!(view.go_back(window, cx));
+        });
+        server_view.read_with(cx, |view, cx| {
+            assert_eq!(view.active_thread().unwrap().read(cx).id, session_a);
+        });
+
+        // Go back with empty stack returns false.
+        server_view.update_in(cx, |view, window, cx| {
+            assert!(!view.go_back(window, cx));
+        });
+        server_view.read_with(cx, |view, cx| {
+            assert_eq!(view.active_thread().unwrap().read(cx).id, session_a);
+        });
+
+        // Go forward: A -> B
+        server_view.update_in(cx, |view, window, cx| {
+            assert!(view.go_forward(window, cx));
+        });
+        server_view.read_with(cx, |view, cx| {
+            assert_eq!(view.active_thread().unwrap().read(cx).id, session_b);
+        });
+
+        // Go forward: B -> C
+        server_view.update_in(cx, |view, window, cx| {
+            assert!(view.go_forward(window, cx));
+        });
+        server_view.read_with(cx, |view, cx| {
+            assert_eq!(view.active_thread().unwrap().read(cx).id, session_c);
+        });
+
+        // Go forward with empty stack returns false.
+        server_view.update_in(cx, |view, window, cx| {
+            assert!(!view.go_forward(window, cx));
+        });
+    }
+
+    #[gpui::test]
+    async fn test_navigate_clears_forward_stack(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (server_view, cx) = setup_thread_view(StubAgentServer::default_response(), cx).await;
+
+        let session_a = server_view.read_with(cx, |view, cx| {
+            view.active_thread().unwrap().read(cx).id.clone()
+        });
+
+        let session_b = SessionId::from("session-b");
+        let session_c = SessionId::from("session-c");
+
+        server_view.update_in(cx, |view, window, cx| {
+            let connected = view.as_connected().expect("should be connected");
+            let connection = connected.connection.clone();
+            let project = view.project.clone();
+
+            let action_log_b = cx.new(|_| ActionLog::new(project.clone()));
+            let thread_b = cx.new(|cx| {
+                AcpThread::new(
+                    None,
+                    "Thread B",
+                    connection.clone(),
+                    project.clone(),
+                    action_log_b,
+                    session_b.clone(),
+                    watch::Receiver::constant(acp::PromptCapabilities::new()),
+                    cx,
+                )
+            });
+            let view_b = view.new_thread_view(None, thread_b, false, None, None, window, cx);
+
+            let action_log_c = cx.new(|_| ActionLog::new(project.clone()));
+            let thread_c = cx.new(|cx| {
+                AcpThread::new(
+                    None,
+                    "Thread C",
+                    connection.clone(),
+                    project.clone(),
+                    action_log_c,
+                    session_c.clone(),
+                    watch::Receiver::constant(acp::PromptCapabilities::new()),
+                    cx,
+                )
+            });
+            let view_c = view.new_thread_view(None, thread_c, false, None, None, window, cx);
+
+            let connected = view.as_connected_mut().expect("should be connected");
+            connected.threads.insert(session_b.clone(), view_b);
+            connected.threads.insert(session_c.clone(), view_c);
+        });
+
+        // Navigate A -> B -> C, then go back to B.
+        server_view.update_in(cx, |view, window, cx| {
+            view.navigate_to_session(session_b.clone(), window, cx);
+        });
+        server_view.update_in(cx, |view, window, cx| {
+            view.navigate_to_session(session_c.clone(), window, cx);
+        });
+        server_view.update_in(cx, |view, window, cx| {
+            assert!(view.go_back(window, cx));
+        });
+        server_view.read_with(cx, |view, cx| {
+            assert_eq!(view.active_thread().unwrap().read(cx).id, session_b);
+        });
+
+        // Now navigate from B to A directly — this should clear the forward stack.
+        server_view.update_in(cx, |view, window, cx| {
+            view.navigate_to_session(session_a.clone(), window, cx);
+        });
+
+        // Forward stack was cleared, so go_forward should fail.
+        server_view.update_in(cx, |view, window, cx| {
+            assert!(!view.go_forward(window, cx));
+        });
+        server_view.read_with(cx, |view, cx| {
+            assert_eq!(view.active_thread().unwrap().read(cx).id, session_a);
+        });
+
+        // But backward stack should have B.
+        server_view.update_in(cx, |view, window, cx| {
+            assert!(view.go_back(window, cx));
+        });
+        server_view.read_with(cx, |view, cx| {
+            assert_eq!(view.active_thread().unwrap().read(cx).id, session_b);
+        });
     }
 
     #[gpui::test]

@@ -7200,13 +7200,18 @@ impl Render for AcpThreadView {
                 }
             }))
             .on_action(cx.listener(|this, _: &workspace::GoBack, window, cx| {
-                if let Some(parent_session_id) = this.parent_id.clone() {
-                    this.server_view
-                        .update(cx, |view, cx| {
-                            view.navigate_to_session(parent_session_id, window, cx);
-                        })
-                        .ok();
-                }
+                this.server_view
+                    .update(cx, |view, cx| {
+                        view.go_back(window, cx);
+                    })
+                    .ok();
+            }))
+            .on_action(cx.listener(|this, _: &workspace::GoForward, window, cx| {
+                this.server_view
+                    .update(cx, |view, cx| {
+                        view.go_forward(window, cx);
+                    })
+                    .ok();
             }))
             .on_action(cx.listener(Self::keep_all))
             .on_action(cx.listener(Self::reject_all))
