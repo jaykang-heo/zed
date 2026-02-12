@@ -698,7 +698,7 @@ impl Sidebar {
                         sidebar._subscriptions.push(cx.subscribe(
                             &entity,
                             |sidebar, _emitter, event, cx| {
-                                // sidebar.handle_thread_activity(event, cx);
+                                // todo! Add handler and deleted variant of this event
                             },
                         ));
                     })
@@ -965,10 +965,12 @@ impl Sidebar {
                         status: AgentThreadStatus::Running,
                     },
                 );
+                cx.notify();
             }
             AcpThreadEvent::TitleUpdated => {
                 if let Some(thread_info) = self.thread_infos.get_mut(&session_id) {
                     thread_info.title = thread.read(cx).title();
+                    cx.notify();
                 }
             }
             _ => {}
