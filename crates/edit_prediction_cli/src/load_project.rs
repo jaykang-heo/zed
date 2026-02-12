@@ -163,12 +163,11 @@ async fn cursor_position_and_selection(
             .await?
     };
 
-    let (cursor_excerpt, selections_within_excerpt) =
+    let (cursor_excerpt, selection_within_excerpt) =
         example.spec.cursor_excerpt_with_selection()?;
-    // NOTE: assuming there is only one selection in input. Must be changed to support multiple selections in input
-    let first_selection = selections_within_excerpt.first().cloned().unwrap_or(0..0);
-    let cursor_offset_within_excerpt = first_selection.end;
-    let selection_start_within_excerpt = first_selection.start;
+    let selection = selection_within_excerpt.unwrap_or(0..0);
+    let cursor_offset_within_excerpt = selection.end;
+    let selection_start_within_excerpt = selection.start;
 
     let excerpt_offset = cursor_buffer.read_with(&*cx, |buffer, _cx| {
         let text = buffer.text();

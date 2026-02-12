@@ -182,7 +182,7 @@ pub fn capture_example(
         };
         spec.set_cursor_excerpt_with_selection(
             &cursor_excerpt,
-            &[cursor_offset_in_excerpt..cursor_offset_in_excerpt],
+            cursor_offset_in_excerpt..cursor_offset_in_excerpt,
             &line_comment_prefix,
         );
         Ok(spec)
