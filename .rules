@@ -136,3 +136,215 @@ Other entities can then register a callback to handle these events by doing `cx.
 ## Build guidelines
 
 - Use `./script/clippy` instead of `cargo clippy`
+
+# Build, Test, and Run
+
+## Building
+- `cargo build` / `cargo build -p <crate>` — build all or a specific crate
+- `cargo run` — run debug build
+- `cargo run --profile release-fast` — run optimized build
+
+## Testing
+- `cargo test -p <crate>` — test a specific crate
+- `cargo test -p <crate> <test_name>` — run a specific test
+
+## Linting and Formatting
+- `./script/clippy` — run clippy (NOT `cargo clippy`)
+- `cargo fmt` — format Rust code
+- `prettier` — format docs
+
+## Scripts
+- `./script/new-crate <name>` — create a new crate (uses `src/<crate_name>.rs`, not `src/lib.rs`)
+
+# Crate Architecture Map
+
+## Core Framework
+- `gpui` — UI framework with state/concurrency primitives
+- `gpui_macros` — proc macros for gpui
+- `ui` — reusable UI components
+- `ui_input` — text input components
+
+## Editor Stack
+- `editor` — main code editor (also used for all text inputs)
+- `text` — text data structures
+- `rope` — rope data structure for efficient text
+- `multi_buffer` — wraps multiple buffers into one view
+
+## Language/LSP
+- `language` — language definitions, syntax highlighting
+- `lsp` — LSP client implementation
+- `languages` — built-in language configurations
+
+## AI/Agent
+- `agent` — core agent logic, thread store, tools
+- `agent_settings` — agent configuration
+- `agent_ui` — agent panel UI
+- `agent_ui_v2` — new agent panel UI
+- `language_model` — model abstractions
+- Provider crates: `anthropic`, `open_ai`, `google_ai`, `ollama`, `copilot`, etc.
+
+## Workspace
+- `workspace` — window layout, panes, items, docks, panels
+- `project` — project state, file operations, stores (BufferStore, LspStore, GitStore)
+- `worktree` — file tree watching and state
+
+## Collaboration
+- `collab` — collaboration server
+- `rpc` — RPC protocol
+- `client` — Zed client for server communication
+- `call` — voice/video calls
+
+## Settings
+- `settings` — settings framework
+- `settings_content` — built-in settings schema
+
+## Extensions
+- `extension` — extension types
+- `extension_host` — extension runtime
+- `extension_api` — API exposed to extensions
+
+## Dev Tools
+- `terminal` / `terminal_view` — integrated terminal
+- `dap` / `debugger_ui` — debugger
+- `git` / `git_ui` — git integration
+- `repl` — REPL support
+
+# Anti-Patterns (from clippy.toml and common bugs)
+
+- `std::process::Command` → `smol::process::Command` (blocking)
+- `smol::Timer::after` → `gpui::BackgroundExecutor::timer` (non-deterministic in tests)
+- `serde_json::from_reader` → `serde_json::from_slice` (performance)
+- No `mod.rs` — use `src/some_module.rs` instead
+- No `src/lib.rs` for new crates — use `src/<crate_name>.rs`
+- No `unwrap()` — use `?` to propagate errors
+- No `let _ =` on Results — use `.log_err()` or handle explicitly
+- No holding references across await points
+- No re-entrant entity updates (causes panic)
+- `as_raw_fd()` → `into_raw_fd()` when transferring file descriptor ownership (prevents double-close)
+- When traversing parent/child graphs (process trees, entity hierarchies), track visited nodes in a `HashSet` to prevent infinite loops from cycles
+- When comparing or merging buffer events, verify `remote_id()` matches — buffers can be swapped out between operations
+
+# Testing Patterns
+
+## Basic Test Setup
+- `#[gpui::test]` attribute with `TestAppContext` or `App`
+- `init_test(cx, |_| {})` — initialize test environment
+- `cx.run_until_parked()` / `executor.run_until_parked()` — drain async executor
+
+## Editor Testing
+- `EditorTestContext::new(cx).await` — create test editor context
+- Marked text format: `ˇ` = cursor position, `«selection»` = selection
+- `cx.set_state("code with ˇcursor")` — set editor state with cursor
+- `cx.assert_state("expected ˇstate")` — verify editor state
+- `cx.simulate_keystrokes(["a", "b", "enter"])` — simulate input
+
+## Language Testing
+- `rust_lang()` — get Rust language for tests
+- `cx.update_buffer(|buffer, cx| buffer.set_language(Some(rust_lang()), cx))`
+
+## Diff Testing
+- `cx.set_head_text(&diff_base)` — set git HEAD content for diff
+- `editor.expand_all_diff_hunks(...)` — expand inline diffs
+- `editor.collapse_all_diff_hunks(...)` — collapse inline diffs
+
+## Filesystem Mocking
+- `FakeFs::new(cx.background_executor.clone())` — mock filesystem
+- `fs.as_fake().insert_tree(path, json!({...})).await` — populate fake filesystem
+
+## Vim Testing
+- `cx.set_shared_state(indoc! {"..."}).await` — set initial vim state
+- `cx.simulate_shared_keystrokes("$ k").await` — simulate vim keystrokes
+- `cx.shared_state().await.assert_eq(...)` — verify vim state
+- Test data files in `crates/vim/test_data/` for snapshot testing
+
+## Modal and Action Testing
+- `cx.dispatch_action(*window, SomeAction)` — trigger action/modal
+- `workspace.read(cx).active_modal::<ModalType>(cx)` — verify modal is open
+- `cx.simulate_prompt_answer("Button Text")` — simulate dialog response
+- Test both single-item and multiple-item cases for pickers
+
+## Critical: Crash Regression Tests
+
+When writing regression tests for crashes (e.g., from Sentry reports):
+
+**DO:** Write tests that exercise user-visible operations through the editor's public API and test utilities. The test should reproduce a realistic sequence of actions a user could perform.
+
+**DON'T:** Directly construct the failure state. A test that manually creates invalid data structures is technically correct but practically useless — it doesn't tell you how to fix the crash because it doesn't show how a user could trigger it.
+
+Example of a GOOD crash regression test (from Eric Holk's Sentry experiment):
+```rust
+#[gpui::test]
+async fn test_stale_offset_after_diff_collapse(executor: BackgroundExecutor, cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+    cx.update_buffer(|buffer, cx| buffer.set_language(Some(rust_lang()), cx));
+    
+    cx.set_state(&"fn main() { let x = ˇ1; }".unindent());
+    cx.set_head_text(&deleted_functions_diff_base);
+    executor.run_until_parked();
+    
+    // Expand diff hunks (makes multi-buffer longer)
+    cx.update_editor(|editor, window, cx| {
+        editor.expand_all_diff_hunks(&ExpandAllDiffHunks, window, cx);
+    });
+    executor.run_until_parked();
+    
+    // Store offsets via syntax node selection
+    cx.update_editor(|editor, window, cx| {
+        editor.select_larger_syntax_node(&SelectLargerSyntaxNode, window, cx);
+    });
+    
+    // Collapse diff hunks (shrinks multi-buffer, stored offsets now stale)
+    cx.update_editor(|editor, window, cx| {
+        editor.collapse_all_diff_hunks(&CollapseAllDiffHunks, window, cx);
+    });
+    executor.run_until_parked();
+    
+    // This triggers the crash with stale offsets
+    cx.update_editor(|editor, window, cx| {
+        editor.select_smaller_syntax_node(&SelectSmallerSyntaxNode, window, cx);
+    });
+}
+```
+
+# Settings Pattern
+
+## Defining Settings
+Use the derive macro with the `Settings` trait:
+```rust
+#[derive(Default, Clone, Serialize, Deserialize)]
+pub struct MySettings {
+    pub some_option: bool,
+}
+
+impl Settings for MySettings {
+    const KEY: Option<&'static str> = Some("my_settings");
+    // ...
+}
+```
+
+## Accessing Settings
+- Settings layer: global → user → project → buffer
+- `MySettings::get_global(cx)` — get global settings
+- `MySettings::get(Some(buffer_id), cx)` — get settings for a specific buffer
+
+# Workspace Patterns
+
+## Action Naming
+- Actions affecting all panes: `*InAllPanes` (e.g., `CloseItemInAllPanes`)
+- Actions affecting only active item: `*ActiveItem` (e.g., `CloseActiveItem`)
+
+## Closing Items
+- Use `workspace.close_items_with_project_path()` rather than manually iterating panes
+- When user discards unsaved changes, call `item.reload()` to sync from disk
+
+## Persistence
+- When restoring persisted state (threads, sessions), verify data still exists in database before use
+- Users may clear data between sessions — handle missing data gracefully with logging
+
+# Crash Investigation
+
+## Sentry Integration
+- Crash investigation prompts: `.factory/prompts/crash/investigate.md`
+- Crash fix prompts: `.factory/prompts/crash/fix.md`
+- Fetch crash reports: `script/sentry-fetch <issue-id>`
