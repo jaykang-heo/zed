@@ -10,7 +10,7 @@ use util::serde::default_true;
 
 use crate::{
     AllLanguageSettingsContent, DelayMs, ExtendingVec, ParseStatus, ProjectTerminalSettingsContent,
-    RootUserSettings, SaturatingBool, SlashCommandSettings, fallible_options,
+    RootUserSettings, SlashCommandSettings, fallible_options,
 };
 
 #[with_fallible_options]
@@ -79,11 +79,6 @@ pub struct ProjectSettingsContent {
 
     /// The list of custom Git hosting providers.
     pub git_hosting_providers: Option<ExtendingVec<GitHostingProviderConfig>>,
-
-    /// Whether to disable all AI features in Zed.
-    ///
-    /// Default: false
-    pub disable_ai: Option<SaturatingBool>,
 }
 
 #[with_fallible_options]
@@ -439,7 +434,7 @@ impl std::fmt::Debug for ContextServerCommand {
 }
 
 #[with_fallible_options]
-#[derive(Copy, Clone, Debug, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct GitSettings {
     /// Whether or not to enable git integration.
     ///
@@ -473,6 +468,13 @@ pub struct GitSettings {
     ///
     /// Default: file_name_first
     pub path_style: Option<GitPathStyle>,
+    /// Directory where agent worktrees are created.
+    /// If not set, defaults to the Zed data directory.
+    ///
+    /// Can be an absolute path or relative to the project root.
+    ///
+    /// Default: null (uses system default)
+    pub agent_worktree_directory: Option<String>,
 }
 
 #[with_fallible_options]
