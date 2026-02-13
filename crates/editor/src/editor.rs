@@ -8091,18 +8091,20 @@ impl Editor {
                                 ranges
                             };
 
-                        // If we have tabstops, select the first one; otherwise use cursor_target
-                        if let Some(first_tabstop) = tabstop_ranges.first() {
+                        // If we have tabstops, place cursor at exit (final) position
+                        // but keep tabstops on the snippet stack so Shift-Tab can
+                        // navigate backwards through them.
+                        if !tabstop_ranges.is_empty() {
                             self.change_selections(
                                 SelectionEffects::no_scroll(),
                                 window,
                                 cx,
                                 |s| {
-                                    s.select_ranges(first_tabstop.iter().rev().cloned());
+                                    s.select_anchor_ranges([cursor_target..cursor_target]);
                                 },
                             );
 
-                            // Push snippet state for Tab/Shift-Tab navigation
+                            // Push snippet state for Shift-Tab navigation
                             let has_non_empty_tabstop = {
                                 let snapshot = self.buffer.read(cx).snapshot(cx);
                                 let range = &tabstop_ranges[0][0];
@@ -8111,7 +8113,7 @@ impl Editor {
                             if tabstop_ranges.len() > 1 || has_non_empty_tabstop {
                                 let choices = vec![None; tabstop_ranges.len()];
                                 self.snippet_stack.push(SnippetState {
-                                    active_index: 0,
+                                    active_index: tabstop_ranges.len() - 1,
                                     ranges: tabstop_ranges,
                                     choices,
                                 });
