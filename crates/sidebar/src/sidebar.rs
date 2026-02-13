@@ -1,4 +1,5 @@
 use acp_thread::{AcpThread, AcpThreadEvent, ThreadStatus};
+use agent::ThreadStore;
 use agent_ui::acp::{self, AcpThreadHistory};
 use agent_ui::{AgentPanel, AgentPanelEvent};
 use db::kvp::KEY_VALUE_STORE;
@@ -658,6 +659,429 @@ impl PickerDelegate for WorkspacePickerDelegate {
     }
 }
 
+#[derive(Clone)]
+struct ThreadEntry {
+    session_id: acp::SessionId,
+    title: SharedString,
+    worktree_label: SharedString,
+    status: AgentThreadStatus,
+}
+
+#[derive(Clone)]
+enum ThreadPickerEntry {
+    Separator(SharedString),
+    Thread(ThreadEntry),
+}
+
+impl ThreadPickerEntry {
+    fn searchable_text(&self) -> &str {
+        match self {
+            ThreadPickerEntry::Separator(_) => "",
+            ThreadPickerEntry::Thread(entry) => entry.title.as_ref(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ThreadPickerMatch {
+    entry: ThreadPickerEntry,
+    positions: Vec<usize>,
+}
+
+struct ThreadPickerDelegate {
+    active_threads: HashMap<acp::SessionId, ThreadEntry>,
+    entries: Vec<ThreadPickerEntry>,
+    matches: Vec<ThreadPickerMatch>,
+    selected_index: usize,
+    query: String,
+    hovered_index: Option<usize>,
+}
+
+impl ThreadPickerDelegate {
+    fn new() -> Self {
+        Self {
+            active_threads: HashMap::new(),
+            entries: Vec::new(),
+            matches: Vec::new(),
+            selected_index: 0,
+            query: String::new(),
+            hovered_index: None,
+        }
+    }
+
+    fn upsert_thread(&mut self, thread: &AcpThread, cx: &App) -> acp::SessionId {
+        let session_id = thread.session_id().clone();
+        let title = thread.title();
+        let status = match thread.status() {
+            ThreadStatus::Generating => AgentThreadStatus::Running,
+            ThreadStatus::Idle => AgentThreadStatus::Completed,
+        };
+
+        let project = thread.project();
+        let worktree_names: Vec<String> = project
+            .read(cx)
+            .worktrees(cx)
+            .filter(|worktree| worktree.read(cx).is_visible())
+            .map(|worktree| {
+                worktree
+                    .read(cx)
+                    .abs_path()
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        let worktree_label: SharedString = if worktree_names.is_empty() {
+            "".into()
+        } else {
+            worktree_names.join(", ").into()
+        };
+
+        let entry = ThreadEntry {
+            session_id: session_id.clone(),
+            title,
+            worktree_label,
+            status,
+        };
+
+        self.active_threads.insert(session_id.clone(), entry);
+        session_id
+    }
+
+    fn rebuild_entries(&mut self, cx: &App) {
+        self.entries.clear();
+
+        let mut active_entries = Vec::new();
+        let mut recent_entries = Vec::new();
+
+        for entry in self.active_threads.values() {
+            match entry.status {
+                AgentThreadStatus::Running => active_entries.push(entry.clone()),
+                AgentThreadStatus::Completed => recent_entries.push(entry.clone()),
+            }
+        }
+
+        let active_session_ids: HashSet<acp::SessionId> =
+            self.active_threads.keys().cloned().collect();
+
+        let thread_store = ThreadStore::global(cx);
+        let store = thread_store.read(cx);
+        let historic_entries: Vec<ThreadEntry> = store
+            .entries()
+            .filter(|metadata| !active_session_ids.contains(&metadata.id))
+            .map(|metadata| ThreadEntry {
+                session_id: metadata.id,
+                title: if metadata.title.is_empty() {
+                    "New Thread".into()
+                } else {
+                    metadata.title
+                },
+                worktree_label: "".into(),
+                status: AgentThreadStatus::Completed,
+            })
+            .collect();
+
+        if !active_entries.is_empty() {
+            self.entries
+                .push(ThreadPickerEntry::Separator("Active".into()));
+            for entry in active_entries {
+                self.entries.push(ThreadPickerEntry::Thread(entry));
+            }
+        }
+
+        if !recent_entries.is_empty() || !historic_entries.is_empty() {
+            self.entries
+                .push(ThreadPickerEntry::Separator("Recent".into()));
+            for entry in recent_entries {
+                self.entries.push(ThreadPickerEntry::Thread(entry));
+            }
+            for entry in historic_entries {
+                self.entries.push(ThreadPickerEntry::Thread(entry));
+            }
+        }
+    }
+
+    fn update_thread_from_event(&mut self, thread: &AcpThread, event: &AcpThreadEvent, cx: &App) {
+        let session_id = thread.session_id().clone();
+
+        match event {
+            AcpThreadEvent::NewEntry | AcpThreadEvent::Stopped => {
+                self.upsert_thread(thread, cx);
+            }
+            AcpThreadEvent::TitleUpdated => {
+                if let Some(entry) = self.active_threads.get_mut(&session_id) {
+                    entry.title = thread.title();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl PickerDelegate for ThreadPickerDelegate {
+    type ListItem = AnyElement;
+
+    fn match_count(&self) -> usize {
+        self.matches.len()
+    }
+
+    fn selected_index(&self) -> usize {
+        self.selected_index
+    }
+
+    fn set_selected_index(
+        &mut self,
+        ix: usize,
+        _window: &mut Window,
+        _cx: &mut Context<Picker<Self>>,
+    ) {
+        self.selected_index = ix;
+    }
+
+    fn can_select(
+        &mut self,
+        ix: usize,
+        _window: &mut Window,
+        _cx: &mut Context<Picker<Self>>,
+    ) -> bool {
+        match self.matches.get(ix) {
+            Some(ThreadPickerMatch {
+                entry: ThreadPickerEntry::Separator(_),
+                ..
+            }) => false,
+            _ => true,
+        }
+    }
+
+    fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
+        "Search…".into()
+    }
+
+    fn no_matches_text(&self, _window: &mut Window, _cx: &mut App) -> Option<SharedString> {
+        if self.query.is_empty() {
+            Some("No active threads.".into())
+        } else {
+            Some("No threads match your search.".into())
+        }
+    }
+
+    fn update_matches(
+        &mut self,
+        query: String,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) -> Task<()> {
+        self.rebuild_entries(cx);
+
+        let query_changed = self.query != query;
+        self.query = query.clone();
+        if query_changed {
+            self.hovered_index = None;
+        }
+        let entries = self.entries.clone();
+
+        if query.is_empty() {
+            self.matches = entries
+                .into_iter()
+                .map(|entry| ThreadPickerMatch {
+                    entry,
+                    positions: Vec::new(),
+                })
+                .collect();
+
+            let first_selectable = self
+                .matches
+                .iter()
+                .position(|m| !matches!(m.entry, ThreadPickerEntry::Separator(_)))
+                .unwrap_or(0);
+            self.selected_index = first_selectable;
+            return Task::ready(());
+        }
+
+        let executor = cx.background_executor().clone();
+        cx.spawn_in(window, async move |picker, cx| {
+            let matches = cx
+                .background_spawn(async move {
+                    let data_entries: Vec<(usize, &ThreadPickerEntry)> = entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, entry)| !matches!(entry, ThreadPickerEntry::Separator(_)))
+                        .collect();
+
+                    let candidates: Vec<StringMatchCandidate> = data_entries
+                        .iter()
+                        .enumerate()
+                        .map(|(candidate_index, (_, entry))| {
+                            StringMatchCandidate::new(candidate_index, entry.searchable_text())
+                        })
+                        .collect();
+
+                    let search_matches = fuzzy::match_strings(
+                        &candidates,
+                        &query,
+                        false,
+                        true,
+                        MAX_MATCHES,
+                        &Default::default(),
+                        executor,
+                    )
+                    .await;
+
+                    let mut active_matches = Vec::new();
+                    let mut recent_matches = Vec::new();
+
+                    for search_match in search_matches {
+                        let (original_index, _) = data_entries[search_match.candidate_id];
+                        let entry = entries[original_index].clone();
+                        let picker_match = ThreadPickerMatch {
+                            positions: search_match.positions,
+                            entry: entry.clone(),
+                        };
+                        if let ThreadPickerEntry::Thread(ref thread_entry) = entry {
+                            match thread_entry.status {
+                                AgentThreadStatus::Running => active_matches.push(picker_match),
+                                AgentThreadStatus::Completed => recent_matches.push(picker_match),
+                            }
+                        }
+                    }
+
+                    let mut result = Vec::new();
+                    if !active_matches.is_empty() {
+                        result.push(ThreadPickerMatch {
+                            entry: ThreadPickerEntry::Separator("Active".into()),
+                            positions: Vec::new(),
+                        });
+                        result.extend(active_matches);
+                    }
+                    if !recent_matches.is_empty() {
+                        result.push(ThreadPickerMatch {
+                            entry: ThreadPickerEntry::Separator("Recent".into()),
+                            positions: Vec::new(),
+                        });
+                        result.extend(recent_matches);
+                    }
+                    result
+                })
+                .await;
+
+            picker
+                .update_in(cx, |picker, _window, _cx| {
+                    picker.delegate.matches = matches;
+                    if picker.delegate.matches.is_empty() {
+                        picker.delegate.selected_index = 0;
+                    } else {
+                        let first_selectable = picker
+                            .delegate
+                            .matches
+                            .iter()
+                            .position(|m| !matches!(m.entry, ThreadPickerEntry::Separator(_)))
+                            .unwrap_or(0);
+                        picker.delegate.selected_index = first_selectable;
+                    }
+                })
+                .log_err();
+        })
+    }
+
+    fn confirm(&mut self, _secondary: bool, _window: &mut Window, _cx: &mut Context<Picker<Self>>) {
+        // TODO: Open/navigate to the selected thread
+    }
+
+    fn dismissed(&mut self, _window: &mut Window, _cx: &mut Context<Picker<Self>>) {}
+
+    fn render_match(
+        &self,
+        index: usize,
+        selected: bool,
+        _window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) -> Option<Self::ListItem> {
+        let match_entry = self.matches.get(index)?;
+        let ThreadPickerMatch { entry, positions } = match_entry;
+
+        match entry {
+            ThreadPickerEntry::Separator(title) => Some(
+                div()
+                    .px_0p5()
+                    .when(index > 0, |this| this.mt_1().child(Divider::horizontal()))
+                    .child(
+                        ListItem::new("section_header").selectable(false).child(
+                            Label::new(title.clone())
+                                .size(LabelSize::XSmall)
+                                .color(Color::Muted)
+                                .when(index > 0, |this| this.mt_1p5())
+                                .mb_1(),
+                        ),
+                    )
+                    .into_any_element(),
+            ),
+            ThreadPickerEntry::Thread(thread_entry) => {
+                let title = thread_entry.title.clone();
+                let worktree_label = thread_entry.worktree_label.clone();
+                let running = thread_entry.status == AgentThreadStatus::Running;
+                let is_hovered = self.hovered_index == Some(index);
+
+                let mut item = ThreadItem::new(
+                    ("thread-item", index),
+                    if title.is_empty() {
+                        SharedString::from("New Thread")
+                    } else {
+                        title
+                    },
+                )
+                .running(running)
+                .selected(selected)
+                .highlight_positions(positions.clone())
+                .hovered(is_hovered)
+                .on_hover(cx.listener(move |picker, is_hovered, _window, cx| {
+                    let mut changed = false;
+                    if *is_hovered {
+                        if picker.delegate.hovered_index != Some(index) {
+                            picker.delegate.hovered_index = Some(index);
+                            changed = true;
+                        }
+                    } else if picker.delegate.hovered_index == Some(index) {
+                        picker.delegate.hovered_index = None;
+                        changed = true;
+                    }
+                    if changed {
+                        cx.notify();
+                    }
+                }));
+
+                if !worktree_label.is_empty() {
+                    item = item.worktree(worktree_label);
+                }
+
+                Some(item.into_any_element())
+            }
+        }
+    }
+
+    fn render_editor(
+        &self,
+        editor: &Arc<dyn ErasedEditor>,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) -> Div {
+        h_flex()
+            .h(Tab::container_height(cx))
+            .w_full()
+            .px_2()
+            .gap_2()
+            .justify_between()
+            .border_b_1()
+            .border_color(cx.theme().colors().border)
+            .child(
+                Icon::new(IconName::MagnifyingGlass)
+                    .color(Color::Muted)
+                    .size(IconSize::Small),
+            )
+            .child(editor.render(window, cx))
+    }
+}
+
 #[derive(PartialEq)]
 enum SidebarContentMode {
     Workspaces,
@@ -670,6 +1094,7 @@ pub struct Sidebar {
     thread_infos: HashMap<acp::SessionId, AgentThreadInfo>,
     content_mode: SidebarContentMode,
     workspace_picker: Entity<Picker<WorkspacePickerDelegate>>,
+    thread_picker: Entity<Picker<ThreadPickerDelegate>>,
     _subscriptions: Vec<Subscription>,
     _project_subscriptions: Vec<Subscription>,
     _agent_panel_subscriptions: Vec<Subscription>,
@@ -697,6 +1122,14 @@ impl Sidebar {
                 .modal(false)
         });
 
+        let thread_delegate = ThreadPickerDelegate::new();
+        let thread_picker = cx.new(|cx| {
+            Picker::list(thread_delegate, window, cx)
+                .max_height(None)
+                .show_scrollbar(true)
+                .modal(false)
+        });
+
         let mut subscriptions = vec![cx.observe_in(
             &multi_workspace,
             window,
@@ -714,7 +1147,7 @@ impl Sidebar {
                     .update(cx, |sidebar, cx| {
                         sidebar._subscriptions.push(cx.subscribe(
                             &entity,
-                            |sidebar, _emitter, event, cx| {
+                            |_sidebar, _emitter, _event, _cx| {
                                 // todo! Add handler and deleted variant of this event
                             },
                         ));
@@ -725,19 +1158,38 @@ impl Sidebar {
 
         let observe_server_views = cx.observe_new::<AcpThread>({
             let weak_sidebar = weak_sidebar.clone();
-            move |_view, _window, cx| {
+            move |thread, _window, cx| {
                 let entity = cx.entity();
                 weak_sidebar
                     .update(cx, |sidebar, cx| {
                         sidebar
                             ._subscriptions
                             .push(cx.subscribe(&entity, Self::handle_acp_thread_event));
+
+                        sidebar.thread_picker.update(cx, |picker, cx| {
+                            picker.delegate.upsert_thread(thread, cx);
+                            picker.delegate.rebuild_entries(cx);
+                            cx.notify();
+                        });
                     })
                     .ok();
             }
         });
 
-        subscriptions.extend([observe_server_views, observe_thread_history]);
+        let observe_thread_store = cx.observe(&ThreadStore::global(cx), {
+            move |this: &mut Self, _, cx| {
+                this.thread_picker.update(cx, |picker, cx| {
+                    picker.delegate.rebuild_entries(cx);
+                    cx.notify();
+                });
+            }
+        });
+
+        subscriptions.extend([
+            observe_server_views,
+            observe_thread_history,
+            observe_thread_store,
+        ]);
 
         let fetch_recent_projects = {
             let picker = picker.downgrade();
@@ -762,6 +1214,7 @@ impl Sidebar {
             multi_workspace,
             width: DEFAULT_WIDTH,
             workspace_picker: picker,
+            thread_picker,
             content_mode: SidebarContentMode::Workspaces,
             thread_infos: HashMap::new(),
             _subscriptions: subscriptions,
@@ -993,6 +1446,21 @@ impl Sidebar {
             }
             _ => {}
         }
+
+        self.thread_picker.update(cx, |picker, cx| {
+            picker
+                .delegate
+                .update_thread_from_event(thread.read(cx), event, cx);
+            picker.delegate.rebuild_entries(cx);
+            cx.notify();
+        });
+    }
+
+    fn refresh_thread_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.thread_picker.update(cx, |picker, cx| {
+            let query = picker.query(cx);
+            picker.update_matches(query, window, cx);
+        });
     }
 
     fn queue_refresh(
@@ -1005,6 +1473,7 @@ impl Sidebar {
             this._project_subscriptions = this.subscribe_to_projects(window, cx);
             this._agent_panel_subscriptions = this.subscribe_to_agent_panels(window, cx);
             this._thread_subscriptions = this.subscribe_to_threads(window, cx);
+            this.refresh_thread_picker(window, cx);
             let (entries, active_index) = multi_workspace.read_with(cx, |multi_workspace, cx| {
                 this.build_workspace_thread_entries(multi_workspace, cx)
             });
@@ -1057,7 +1526,10 @@ impl WorkspaceSidebar for Sidebar {
 
 impl Focusable for Sidebar {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.workspace_picker.read(cx).focus_handle(cx)
+        match self.content_mode {
+            SidebarContentMode::Workspaces => self.workspace_picker.read(cx).focus_handle(cx),
+            SidebarContentMode::Threads => self.thread_picker.read(cx).focus_handle(cx),
+        }
     }
 }
 
@@ -1096,12 +1568,13 @@ impl Render for Sidebar {
             .id("workspace-sidebar")
             .key_context("WorkspaceSidebar")
             .when_else(
-                self.content_mode == SidebarContentMode::Workspaces,
+                self.content_mode == SidebarContentMode::Threads,
                 {
                     let weak_sidebar = weak_sidebar.clone();
                     move |this| {
                         this.on_action({
                             move |_: &ShowWorkspaces, _, cx| {
+                                dbg!("show workspaces action");
                                 weak_sidebar
                                     .update(cx, |sidebar, cx| {
                                         sidebar.content_mode = SidebarContentMode::Workspaces;
@@ -1114,6 +1587,7 @@ impl Render for Sidebar {
                 },
                 |this| {
                     this.on_action(move |_: &ShowThreads, _, cx| {
+                        dbg!("show threads action");
                         weak_sidebar
                             .update(cx, |sidebar, cx| {
                                 sidebar.content_mode = SidebarContentMode::Threads;
@@ -1200,6 +1674,7 @@ impl Render for Sidebar {
                                     .icon_size(IconSize::Small)
                                     .disabled(self.content_mode == SidebarContentMode::Threads)
                                     .on_click(|_, window, cx| {
+                                        dbg!("Show threads ");
                                         window.dispatch_action(ShowThreads.boxed_clone(), cx)
                                     })
                                     .tooltip(|_, cx| {
@@ -1224,7 +1699,10 @@ impl Render for Sidebar {
                             ),
                     ),
             )
-            .child(self.workspace_picker.clone())
+            .child(match self.content_mode {
+                SidebarContentMode::Workspaces => self.workspace_picker.clone().into_any_element(),
+                SidebarContentMode::Threads => self.thread_picker.clone().into_any_element(),
+            })
     }
 }
 
@@ -1242,6 +1720,7 @@ mod tests {
             cx.set_global(settings_store);
             theme::init(theme::LoadThemes::JustBase, cx);
             editor::init(cx);
+            ThreadStore::init_global(cx);
             cx.update_flags(false, vec!["agent-v2".into()]);
         });
     }
