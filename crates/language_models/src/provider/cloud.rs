@@ -960,12 +960,13 @@ where
                     vec![Err(LanguageModelCompletionError::from(error))]
                 }
                 Ok(CompletionEvent::Status(event)) => {
-                    vec![
-                        LanguageModelCompletionEvent::from_completion_request_status(
-                            event,
-                            provider.clone(),
-                        ),
-                    ]
+                    LanguageModelCompletionEvent::from_completion_request_status(
+                        event,
+                        provider.clone(),
+                    )
+                    .transpose()
+                    .map(|event| vec![event])
+                    .unwrap_or_default()
                 }
                 Ok(CompletionEvent::Event(event)) => map_callback(event),
             })
