@@ -1,0 +1,77 @@
+From: Zed Industries <hi@zed.dev>
+Subject: [PATCH] Fix use-after-free on CFRunLoopRef in FsEventWatcher::stop
+
+The watcher thread stores a non-retained CFRunLoopRef obtained from
+CFRunLoopGetCurrent(). If CFRunLoopRun() returns early (e.g. because
+the watched volume was unmounted and all sources were removed from
+the run loop), the thread exits and the CFRunLoop is deallocated.
+The stored CFRunLoopRef becomes a dangling pointer.
+
+The next call to watch()/unwatch()/drop() invokes stop(), which calls
+CFRunLoopIsWaiting() on the dangling pointer. On ARM64 macOS this
+triggers a PAC signature check failure: EXC_BREAKPOINT at
+__CFCheckCFInfoPACSignature.
+
+Fix this by:
+1. Calling CFRetain on the CFRunLoopRef before sending it across the
+   channel, so the reference remains valid even after the thread exits.
+2. Checking thread_handle.is_finished() before spinning on
+   CFRunLoopIsWaiting, to avoid an infinite spin loop on a run loop
+   that has already stopped and will never enter the waiting state.
+3. Calling CFRelease after joining the thread, to balance the retain.
+
+--- a/notify/src/fsevent.rs
++++ b/notify/src/fsevent.rs
+@@ -264,7 +264,9 @@ extern "C" fn release_context(info: *const libc::c_void) {
+ }
+
+ extern "C" {
+-    /// Indicates whether the run loop is waiting for an event.
++    fn CFRetain(cf: cf::CFRef) -> cf::CFRef;
++
++    // Indicates whether the run loop is waiting for an event.
+     fn CFRunLoopIsWaiting(runloop: cf::CFRunLoopRef) -> cf::Boolean;
+ }
+
+@@ -330,17 +332,30 @@ impl FsEventWatcher {
+     fn stop(&mut self) {
+         if !self.is_running() {
+             return;
+         }
+
+         if let Some((runloop, thread_handle)) = self.runloop.take() {
+             unsafe {
+                 let runloop = runloop as *mut raw::c_void;
+
+-                while CFRunLoopIsWaiting(runloop) == 0 {
+-                    thread::yield_now();
++                // If the thread has already exited (e.g. CFRunLoopRun returned
++                // early because all sources were removed), skip the spin loop.
++                // The CFRunLoopRef is still valid (we retained it) but the run
++                // loop will never enter the waiting state, so spinning would
++                // hang forever.
++                if !thread_handle.is_finished() {
++                    while CFRunLoopIsWaiting(runloop) == 0 {
++                        thread::yield_now();
++                    }
++
++                    cf::CFRunLoopStop(runloop);
+                 }
+
+-                cf::CFRunLoopStop(runloop);
++                // Balance the CFRetain in run().
++                cf::CFRelease(runloop);
+             }
+
+             // Wait for the thread to shut down.
+@@ -469,6 +484,10 @@ impl FsEventWatcher {
+                 unsafe {
+                     let cur_runloop = cf::CFRunLoopGetCurrent();
+
++                    // Prevent the run loop from being deallocated when this
++                    // thread exits. Balanced by CFRelease in stop().
++                    CFRetain(cur_runloop);
++
+                     fs::FSEventStreamScheduleWithRunLoop(
+                         stream,
+                         cur_runloop,

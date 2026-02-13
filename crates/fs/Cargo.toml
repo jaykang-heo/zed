@@ -57,5 +57,8 @@ fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 git = { workspace = true, features = ["test-support"] }
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+mach2.workspace = true
+
 [features]
 test-support = ["gpui/test-support", "git/test-support"]
