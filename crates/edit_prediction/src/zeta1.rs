@@ -329,6 +329,79 @@ mod tests {
     use text::OffsetRangeExt as _;
 
     #[gpui::test]
+    fn test_parse_edits_with_multibyte_utf8(cx: &mut App) {
+        // Regression test for ZED-4VS: parse_edits panics with "byte index X is not a char boundary"
+        // when the model returns content containing multi-byte UTF-8 characters near the markers.
+        //
+        // The bug: content_start and content_end are computed with +1/-1 byte adjustments,
+        // which can land inside multi-byte UTF-8 characters.
+
+        let buffer = cx.new(|cx| Buffer::local("hello", cx));
+        let snapshot = buffer.read(cx).snapshot();
+
+        // Content with box-drawing characters (3 bytes each: U+2518 = ┘)
+        // The editable region contains these multi-byte chars right after/before the markers
+        let content_with_multibyte = format!(
+            "{}\n┌───┐\n│box│\n└───┘\n{}",
+            EDITABLE_REGION_START_MARKER, EDITABLE_REGION_END_MARKER
+        );
+
+        // This should not panic - it should handle the UTF-8 boundaries correctly
+        let result = parse_edits(&content_with_multibyte, 0..5, &snapshot);
+        assert!(
+            result.is_ok(),
+            "parse_edits should handle multi-byte UTF-8 content"
+        );
+    }
+
+    #[gpui::test]
+    fn test_parse_edits_multibyte_before_end_marker(cx: &mut App) {
+        // Regression test for ZED-4VS: The crash occurs when there's a multi-byte character
+        // immediately before the end marker. The `.saturating_sub(1)` to skip the newline
+        // can land inside a multi-byte character.
+
+        let buffer = cx.new(|cx| Buffer::local("hello", cx));
+        let snapshot = buffer.read(cx).snapshot();
+
+        // Put a multi-byte char (┘ = 3 bytes) right before the newline before the end marker
+        // The -1 adjustment to skip the newline will land inside the ┘ character
+        let content = format!(
+            "{}some text┘\n{}",
+            EDITABLE_REGION_START_MARKER, EDITABLE_REGION_END_MARKER
+        );
+
+        let result = parse_edits(&content, 0..5, &snapshot);
+        assert!(
+            result.is_ok(),
+            "parse_edits should handle multi-byte chars before end marker"
+        );
+    }
+
+    #[gpui::test]
+    fn test_parse_edits_multibyte_after_start_marker_no_newline(cx: &mut App) {
+        // Regression test for ZED-4VS: The crash occurs when a multi-byte character
+        // appears immediately after the start marker (without the expected newline).
+        // The `+1` to skip the newline lands inside the multi-byte character.
+
+        let buffer = cx.new(|cx| Buffer::local("hello", cx));
+        let snapshot = buffer.read(cx).snapshot();
+
+        // Start marker followed directly by a multi-byte char (no newline)
+        // The +1 adjustment will land inside the ┌ character (bytes 0..3)
+        let content = format!(
+            "{}┌some text\n{}",
+            EDITABLE_REGION_START_MARKER, EDITABLE_REGION_END_MARKER
+        );
+
+        // This should not panic after the fix - it properly checks char boundaries
+        let result = parse_edits(&content, 0..5, &snapshot);
+        assert!(
+            result.is_ok(),
+            "parse_edits should handle multi-byte chars after start marker"
+        );
+    }
+
+    #[gpui::test]
     fn test_excerpt_for_cursor_position(cx: &mut App) {
         let text = indoc! {r#"
             fn foo() {
