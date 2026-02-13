@@ -8040,8 +8040,8 @@ impl Editor {
                                         let end_pos = MultiBufferOffset(
                                             (end_base + end_offset).min(snapshot.len().0),
                                         );
-                                        let start = snapshot.anchor_after(start_pos);
-                                        let end = snapshot.anchor_before(end_pos);
+                                        let start = snapshot.anchor_before(start_pos);
+                                        let end = snapshot.anchor_after(end_pos);
                                         vec![start..end]
                                     })
                                     .collect();
