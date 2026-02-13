@@ -27,7 +27,9 @@ use gpui::{
     prelude::*,
 };
 use language::language_settings::all_language_settings;
-use language::{Anchor, Buffer, File, Point, TextBufferSnapshot, ToOffset, ToPoint};
+use language::{
+    Anchor, Buffer, DiagnosticSeverity, File, Point, TextBufferSnapshot, ToOffset, ToPoint,
+};
 use language::{BufferSnapshot, OffsetRangeExt};
 use language_model::{LlmApiToken, NeedsLlmTokenRefresh, RefreshLlmTokenListener};
 use project::{DisableAiSettings, Project, ProjectPath, WorktreeId};
@@ -41,6 +43,7 @@ use text::Edit;
 use workspace::Workspace;
 use zeta_prompt::{ZetaFormat, ZetaPromptInput};
 
+use std::hash::{Hash, Hasher};
 use std::mem;
 use std::ops::Range;
 use std::path::Path;
@@ -314,6 +317,8 @@ struct ProjectState {
     context: Entity<RelatedExcerptStore>,
     license_detection_watchers: HashMap<WorktreeId, Rc<LicenseDetectionWatcher>>,
     user_actions: VecDeque<UserActionRecord>,
+    last_diagnostic_jump_target: Option<(EntityId, Point)>,
+    last_diagnostic_state_hash: Option<u64>,
     _subscriptions: [gpui::Subscription; 2],
     copilot: Option<Entity<Copilot>>,
 }
@@ -901,6 +906,8 @@ impl EditPredictionStore {
                 last_prediction_refresh: None,
                 license_detection_watchers: HashMap::default(),
                 user_actions: VecDeque::with_capacity(USER_ACTION_HISTORY_SIZE),
+                last_diagnostic_jump_target: None,
+                last_diagnostic_state_hash: None,
                 _subscriptions: [
                     cx.subscribe(&project, Self::handle_project_event),
                     cx.observe_release(&project, move |this, _, cx| {
@@ -999,6 +1006,8 @@ impl EditPredictionStore {
                 let Some(project_state) = self.projects.get_mut(&project.entity_id()) else {
                     return;
                 };
+                project_state.last_diagnostic_jump_target = None;
+                project_state.last_diagnostic_state_hash = None;
                 let path = project.read(cx).path_for_entry(*active_entry_id, cx);
                 if let Some(path) = path {
                     if let Some(ix) = project_state
@@ -1457,6 +1466,10 @@ impl EditPredictionStore {
         position: language::Anchor,
         cx: &mut Context<Self>,
     ) {
+        if let Some(project_state) = self.projects.get_mut(&project.entity_id()) {
+            project_state.last_diagnostic_jump_target = None;
+            project_state.last_diagnostic_state_hash = None;
+        }
         self.queue_prediction_refresh(project.clone(), buffer.entity_id(), cx, move |this, cx| {
             let Some(request_task) = this
                 .update(cx, |this, cx| {
@@ -1486,6 +1499,28 @@ impl EditPredictionStore {
         })
     }
 
+    fn diagnostic_state_hash(snapshot: &BufferSnapshot, cursor_point: Point) -> u64 {
+        let mut hasher = std::hash::DefaultHasher::new();
+        cursor_point.hash(&mut hasher);
+        for (server_id, group) in snapshot.diagnostic_groups(None) {
+            let primary = &group.entries[group.primary_ix];
+            let range = primary.range.to_point(snapshot);
+            server_id.0.hash(&mut hasher);
+            match primary.diagnostic.severity {
+                DiagnosticSeverity::ERROR => 1u8,
+                DiagnosticSeverity::WARNING => 2,
+                DiagnosticSeverity::INFORMATION => 3,
+                DiagnosticSeverity::HINT => 4,
+                _ => 0,
+            }
+            .hash(&mut hasher);
+            range.start.hash(&mut hasher);
+            range.end.hash(&mut hasher);
+            primary.diagnostic.message.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     pub fn refresh_prediction_from_diagnostics(
         &mut self,
         project: Entity<Project>,
@@ -1499,6 +1534,24 @@ impl EditPredictionStore {
         if project_state.current_prediction.is_some() {
             return;
         };
+
+        let diagnostic_hash =
+            project_state
+                .active_buffer(&project, cx)
+                .map(|(buffer, position)| {
+                    let snapshot = buffer.read(cx).snapshot();
+                    let cursor_point = position
+                        .map(|pos| pos.to_point(&snapshot))
+                        .unwrap_or_default();
+                    Self::diagnostic_state_hash(&snapshot, cursor_point)
+                });
+        if diagnostic_hash.is_some() && project_state.last_diagnostic_state_hash == diagnostic_hash
+        {
+            return;
+        }
+        project_state.last_diagnostic_state_hash = diagnostic_hash;
+
+        let last_diagnostic_jump_target = project_state.last_diagnostic_jump_target;
 
         self.queue_prediction_refresh(project.clone(), project.entity_id(), cx, move |this, cx| {
             let Some((active_buffer, snapshot, cursor_point)) = this
@@ -1536,6 +1589,22 @@ impl EditPredictionStore {
                 else {
                     return anyhow::Ok(None);
                 };
+
+                let jump_point = jump_buffer.read_with(cx, |buffer, _| {
+                    jump_position.to_point(&buffer.text_snapshot())
+                });
+                let jump_buffer_id = jump_buffer.entity_id();
+
+                if last_diagnostic_jump_target == Some((jump_buffer_id, jump_point)) {
+                    return anyhow::Ok(None);
+                }
+
+                this.update(cx, |this, _cx| {
+                    if let Some(project_state) = this.projects.get_mut(&project.entity_id()) {
+                        project_state.last_diagnostic_jump_target =
+                            Some((jump_buffer_id, jump_point));
+                    }
+                })?;
 
                 let Some(prediction_result) = this
                     .update(cx, |this, cx| {
