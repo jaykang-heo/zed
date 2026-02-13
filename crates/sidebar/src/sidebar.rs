@@ -5,8 +5,8 @@ use db::kvp::KEY_VALUE_STORE;
 use fs::Fs;
 use fuzzy::StringMatchCandidate;
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Render, SharedString,
-    Subscription, Task, Window, px,
+    Action, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Render,
+    SharedString, Subscription, Task, Window, actions, px,
 };
 use picker::{Picker, PickerDelegate};
 use project::Event as ProjectEvent;
@@ -37,6 +37,16 @@ struct AgentThreadInfo {
     title: SharedString,
     status: AgentThreadStatus,
 }
+
+actions!(
+    sidebar,
+    [
+        /// Show active and recent workspaces in the sidebar
+        ShowWorkspaces,
+        /// Show active and recent agent threads in the sidebar
+        ShowThreads,
+    ]
+);
 
 const LAST_THREAD_TITLES_KEY: &str = "sidebar-last-thread-titles";
 
@@ -648,11 +658,18 @@ impl PickerDelegate for WorkspacePickerDelegate {
     }
 }
 
+#[derive(PartialEq)]
+enum SidebarContentMode {
+    Workspaces,
+    Threads,
+}
+
 pub struct Sidebar {
     multi_workspace: Entity<MultiWorkspace>,
     width: Pixels,
     thread_infos: HashMap<acp::SessionId, AgentThreadInfo>,
-    picker: Entity<Picker<WorkspacePickerDelegate>>,
+    content_mode: SidebarContentMode,
+    workspace_picker: Entity<Picker<WorkspacePickerDelegate>>,
     _subscriptions: Vec<Subscription>,
     _project_subscriptions: Vec<Subscription>,
     _agent_panel_subscriptions: Vec<Subscription>,
@@ -744,7 +761,8 @@ impl Sidebar {
         let mut this = Self {
             multi_workspace,
             width: DEFAULT_WIDTH,
-            picker,
+            workspace_picker: picker,
+            content_mode: SidebarContentMode::Workspaces,
             thread_infos: HashMap::new(),
             _subscriptions: subscriptions,
             _project_subscriptions: Vec::new(),
@@ -825,7 +843,7 @@ impl Sidebar {
         projects: Vec<RecentProjectEntry>,
         cx: &mut Context<Self>,
     ) {
-        self.picker.update(cx, |picker, _cx| {
+        self.workspace_picker.update(cx, |picker, _cx| {
             picker.delegate.recent_projects = projects;
         });
     }
@@ -850,7 +868,7 @@ impl Sidebar {
     ) {
         self.test_recent_project_thread_titles
             .insert(full_path.clone(), title.clone());
-        self.picker.update(cx, |picker, _cx| {
+        self.workspace_picker.update(cx, |picker, _cx| {
             picker
                 .delegate
                 .recent_project_thread_titles
@@ -993,13 +1011,23 @@ impl Sidebar {
 
             this.persist_thread_titles(&entries, &multi_workspace, cx);
 
-            let had_notifications = !this.picker.read(cx).delegate.notified_workspaces.is_empty();
-            this.picker.update(cx, |picker, cx| {
+            let had_notifications = !this
+                .workspace_picker
+                .read(cx)
+                .delegate
+                .notified_workspaces
+                .is_empty();
+            this.workspace_picker.update(cx, |picker, cx| {
                 picker.delegate.set_entries(entries, active_index, cx);
                 let query = picker.query(cx);
                 picker.update_matches(query, window, cx);
             });
-            let has_notifications = !this.picker.read(cx).delegate.notified_workspaces.is_empty();
+            let has_notifications = !this
+                .workspace_picker
+                .read(cx)
+                .delegate
+                .notified_workspaces
+                .is_empty();
             if had_notifications != has_notifications {
                 multi_workspace.update(cx, |_, cx| cx.notify());
             }
@@ -1018,13 +1046,18 @@ impl WorkspaceSidebar for Sidebar {
     }
 
     fn has_notifications(&self, cx: &App) -> bool {
-        !self.picker.read(cx).delegate.notified_workspaces.is_empty()
+        !self
+            .workspace_picker
+            .read(cx)
+            .delegate
+            .notified_workspaces
+            .is_empty()
     }
 }
 
 impl Focusable for Sidebar {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.picker.read(cx).focus_handle(cx)
+        self.workspace_picker.read(cx).focus_handle(cx)
     }
 }
 
@@ -1057,9 +1090,39 @@ impl Render for Sidebar {
             "Focus Sidebar"
         };
 
+        let weak_sidebar = cx.weak_entity();
+
         v_flex()
             .id("workspace-sidebar")
             .key_context("WorkspaceSidebar")
+            .when_else(
+                self.content_mode == SidebarContentMode::Workspaces,
+                {
+                    let weak_sidebar = weak_sidebar.clone();
+                    move |this| {
+                        this.on_action({
+                            move |_: &ShowWorkspaces, _, cx| {
+                                weak_sidebar
+                                    .update(cx, |sidebar, cx| {
+                                        sidebar.content_mode = SidebarContentMode::Workspaces;
+                                        cx.notify();
+                                    })
+                                    .ok();
+                            }
+                        })
+                    }
+                },
+                |this| {
+                    this.on_action(move |_: &ShowThreads, _, cx| {
+                        weak_sidebar
+                            .update(cx, |sidebar, cx| {
+                                sidebar.content_mode = SidebarContentMode::Threads;
+                                cx.notify();
+                            })
+                            .ok();
+                    })
+                },
+            )
             .font(ui_font)
             .h_full()
             .w(self.width)
@@ -1120,19 +1183,48 @@ impl Render for Sidebar {
                             }))
                     })
                     .child(
-                        IconButton::new("new-workspace", IconName::Plus)
-                            .icon_size(IconSize::Small)
-                            .tooltip(|_window, cx| {
-                                Tooltip::for_action("New Workspace", &NewWorkspaceInWindow, cx)
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.multi_workspace.update(cx, |multi_workspace, cx| {
-                                    multi_workspace.create_workspace(window, cx);
-                                });
-                            })),
+                        h_flex()
+                            .child(
+                                IconButton::new("sidebar-workspace-content", IconName::Folder)
+                                    .icon_size(IconSize::Small)
+                                    .disabled(self.content_mode == SidebarContentMode::Workspaces)
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(ShowWorkspaces.boxed_clone(), cx)
+                                    })
+                                    .tooltip(|_, cx| {
+                                        Tooltip::for_action("Show Workspaces", &ShowWorkspaces, cx)
+                                    }),
+                            )
+                            .child(
+                                IconButton::new("sidebar-thread-content", IconName::ZedAgentTwo)
+                                    .icon_size(IconSize::Small)
+                                    .disabled(self.content_mode == SidebarContentMode::Threads)
+                                    .on_click(|_, window, cx| {
+                                        window.dispatch_action(ShowThreads.boxed_clone(), cx)
+                                    })
+                                    .tooltip(|_, cx| {
+                                        Tooltip::for_action("Show Agent Threads", &ShowThreads, cx)
+                                    }),
+                            )
+                            .child(
+                                IconButton::new("new-workspace", IconName::Plus)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(|_window, cx| {
+                                        Tooltip::for_action(
+                                            "New Workspace",
+                                            &NewWorkspaceInWindow,
+                                            cx,
+                                        )
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.multi_workspace.update(cx, |multi_workspace, cx| {
+                                            multi_workspace.create_workspace(window, cx);
+                                        });
+                                    })),
+                            ),
                     ),
             )
-            .child(self.picker.clone())
+            .child(self.workspace_picker.clone())
     }
 }
 
