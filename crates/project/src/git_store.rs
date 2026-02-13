@@ -541,6 +541,8 @@ impl GitStore {
         client.add_entity_request_handler(Self::handle_git_clone);
         client.add_entity_request_handler(Self::handle_get_worktrees);
         client.add_entity_request_handler(Self::handle_create_worktree);
+        client.add_entity_request_handler(Self::handle_remove_worktree);
+        client.add_entity_request_handler(Self::handle_rename_worktree);
     }
 
     pub fn is_local(&self) -> bool {
@@ -2292,6 +2294,44 @@ impl GitStore {
         repository_handle
             .update(&mut cx, |repository_handle, _| {
                 repository_handle.create_worktree(name, directory, commit)
+            })
+            .await??;
+
+        Ok(proto::Ack {})
+    }
+
+    async fn handle_remove_worktree(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::GitRemoveWorktree>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::Ack> {
+        let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
+        let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
+        let path = PathBuf::from(envelope.payload.path);
+        let force = envelope.payload.force;
+
+        repository_handle
+            .update(&mut cx, |repository_handle, _| {
+                repository_handle.remove_worktree(path, force)
+            })
+            .await??;
+
+        Ok(proto::Ack {})
+    }
+
+    async fn handle_rename_worktree(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::GitRenameWorktree>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::Ack> {
+        let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
+        let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
+        let old_path = PathBuf::from(envelope.payload.old_path);
+        let new_path = PathBuf::from(envelope.payload.new_path);
+
+        repository_handle
+            .update(&mut cx, |repository_handle, _| {
+                repository_handle.rename_worktree(old_path, new_path)
             })
             .await??;
 
@@ -5551,6 +5591,62 @@ impl Repository {
                                 name,
                                 directory: path.to_string_lossy().to_string(),
                                 commit,
+                            })
+                            .await?;
+
+                        Ok(())
+                    }
+                }
+            },
+        )
+    }
+
+    pub fn remove_worktree(&mut self, path: PathBuf, force: bool) -> oneshot::Receiver<Result<()>> {
+        let id = self.id;
+        self.send_job(
+            Some("git worktree remove".into()),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.remove_worktree(path, force).await
+                    }
+                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                        client
+                            .request(proto::GitRemoveWorktree {
+                                project_id: project_id.0,
+                                repository_id: id.to_proto(),
+                                path: path.to_string_lossy().to_string(),
+                                force,
+                            })
+                            .await?;
+
+                        Ok(())
+                    }
+                }
+            },
+        )
+    }
+
+    pub fn rename_worktree(
+        &mut self,
+        old_path: PathBuf,
+        new_path: PathBuf,
+    ) -> oneshot::Receiver<Result<()>> {
+        let id = self.id;
+        self.send_job(
+            Some("git worktree move".into()),
+            move |repo, _cx| async move {
+                match repo {
+                    RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        backend.rename_worktree(old_path, new_path).await
+                    }
+                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
+                        client
+                            .request(proto::GitRenameWorktree {
+                                project_id: project_id.0,
+                                repository_id: id.to_proto(),
+                                old_path: old_path.to_string_lossy().to_string(),
+                                new_path: new_path.to_string_lossy().to_string(),
                             })
                             .await?;
 

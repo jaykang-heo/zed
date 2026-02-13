@@ -1,9 +1,9 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use call::ActiveCall;
 use git::status::{FileStatus, StatusCode, TrackedStatus};
 use git_ui::project_diff::ProjectDiff;
-use gpui::{AppContext as _, TestAppContext, VisualTestContext};
+use gpui::{AppContext as _, BackgroundExecutor, TestAppContext, VisualTestContext};
 use project::ProjectPath;
 use serde_json::json;
 use util::{path, rel_path::rel_path};
@@ -140,4 +140,153 @@ async fn test_project_diff(cx_a: &mut TestAppContext, cx_b: &mut TestAppContext)
             ]
         );
     });
+}
+
+#[gpui::test]
+async fn test_repository_remove_worktree_remote_roundtrip(
+    executor: BackgroundExecutor,
+    cx_a: &mut TestAppContext,
+    cx_b: &mut TestAppContext,
+) {
+    let mut server = TestServer::start(executor.clone()).await;
+    let client_a = server.create_client(cx_a, "user_a").await;
+    let client_b = server.create_client(cx_b, "user_b").await;
+    server
+        .create_room(&mut [(&client_a, cx_a), (&client_b, cx_b)])
+        .await;
+    let active_call_a = cx_a.read(ActiveCall::global);
+
+    client_a
+        .fs()
+        .insert_tree(path!("/project"), json!({ ".git": {} }))
+        .await;
+    client_a
+        .fs()
+        .insert_branches(Path::new(path!("/project/.git")), &["main"]);
+
+    let (project_a, _) = client_a.build_local_project(path!("/project"), cx_a).await;
+    let project_id = active_call_a
+        .update(cx_a, |call, cx| call.share_project(project_a.clone(), cx))
+        .await
+        .unwrap();
+    let project_b = client_b.join_remote_project(project_id, cx_b).await;
+    executor.run_until_parked();
+
+    // Verify we can call branches() on the remote repo (proven pattern).
+    let repo_b = cx_b.update(|cx| project_b.read(cx).active_repository(cx).unwrap());
+    let branches = cx_b
+        .update(|cx| repo_b.update(cx, |repo, _| repo.branches()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        branches.iter().any(|b| b.name() == "main"),
+        "should see main branch via remote"
+    );
+
+    // Pre-populate a worktree on the host so we can remove it via remote.
+    client_a
+        .fs()
+        .with_git_state(Path::new(path!("/project/.git")), false, |state| {
+            state.worktrees.push(git::repository::Worktree {
+                path: PathBuf::from("/worktrees/test-branch"),
+                ref_name: "refs/heads/test-branch".into(),
+                sha: "abc123".into(),
+            });
+        })
+        .unwrap();
+
+    // Remove the worktree via the remote RPC path.
+    cx_b.update(|cx| {
+        repo_b.update(cx, |repo, _| {
+            repo.remove_worktree(PathBuf::from("/worktrees/test-branch"), false)
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    executor.run_until_parked();
+
+    // Verify the worktree was removed on the host.
+    client_a
+        .fs()
+        .with_git_state(Path::new(path!("/project/.git")), false, |state| {
+            assert!(
+                state.worktrees.is_empty(),
+                "worktree should be removed on host"
+            );
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+async fn test_repository_rename_worktree_remote_roundtrip(
+    executor: BackgroundExecutor,
+    cx_a: &mut TestAppContext,
+    cx_b: &mut TestAppContext,
+) {
+    let mut server = TestServer::start(executor.clone()).await;
+    let client_a = server.create_client(cx_a, "user_a").await;
+    let client_b = server.create_client(cx_b, "user_b").await;
+    server
+        .create_room(&mut [(&client_a, cx_a), (&client_b, cx_b)])
+        .await;
+    let active_call_a = cx_a.read(ActiveCall::global);
+
+    client_a
+        .fs()
+        .insert_tree(path!("/project"), json!({ ".git": {} }))
+        .await;
+    client_a
+        .fs()
+        .insert_branches(Path::new(path!("/project/.git")), &["main"]);
+
+    let (project_a, _) = client_a.build_local_project(path!("/project"), cx_a).await;
+    let project_id = active_call_a
+        .update(cx_a, |call, cx| call.share_project(project_a.clone(), cx))
+        .await
+        .unwrap();
+    let project_b = client_b.join_remote_project(project_id, cx_b).await;
+    executor.run_until_parked();
+
+    let repo_b = cx_b.update(|cx| project_b.read(cx).active_repository(cx).unwrap());
+
+    // Pre-populate a worktree on the host so we can rename it via remote.
+    client_a
+        .fs()
+        .with_git_state(Path::new(path!("/project/.git")), false, |state| {
+            state.worktrees.push(git::repository::Worktree {
+                path: PathBuf::from("/worktrees/old-branch"),
+                ref_name: "refs/heads/old-branch".into(),
+                sha: "abc123".into(),
+            });
+        })
+        .unwrap();
+
+    // Rename the worktree via the remote RPC path.
+    cx_b.update(|cx| {
+        repo_b.update(cx, |repo, _| {
+            repo.rename_worktree(
+                PathBuf::from("/worktrees/old-branch"),
+                PathBuf::from("/worktrees/new-branch"),
+            )
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    executor.run_until_parked();
+
+    // Verify the worktree was renamed on the host.
+    client_a
+        .fs()
+        .with_git_state(Path::new(path!("/project/.git")), false, |state| {
+            assert_eq!(state.worktrees.len(), 1, "should still have one worktree");
+            assert_eq!(
+                state.worktrees[0].path,
+                PathBuf::from("/worktrees/new-branch"),
+                "worktree path should be renamed on host"
+            );
+        })
+        .unwrap();
 }
