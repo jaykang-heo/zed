@@ -52,6 +52,102 @@ macro_rules! debug_panic {
     };
 }
 
+/// Global reporter set at init time by the crash/reliability infrastructure.
+/// If unset, `soft_unreachable!` still logs but does not report externally.
+static SOFT_UNREACHABLE_REPORTER: OnceLock<
+    Box<dyn Fn(String, String, &'static str, u32) + Send + Sync>,
+> = OnceLock::new();
+
+/// Register the global reporter for `soft_unreachable!` events.
+/// Should be called once during application startup.
+pub fn set_soft_unreachable_reporter(
+    reporter: impl Fn(String, String, &'static str, u32) + Send + Sync + 'static,
+) {
+    if SOFT_UNREACHABLE_REPORTER.set(Box::new(reporter)).is_err() {
+        log::warn!("soft_unreachable reporter has already been set");
+    }
+}
+
+/// Called by the `soft_unreachable!` macro. Not intended for direct use.
+/// Dispatches to the globally registered reporter if one has been set.
+///
+/// Accepts a `&Backtrace` so that `to_string()` is only paid when a
+/// reporter is actually registered.
+pub fn report_soft_unreachable(
+    message: &std::fmt::Arguments<'_>,
+    backtrace: &std::backtrace::Backtrace,
+    file: &'static str,
+    line: u32,
+) {
+    if let Some(reporter) = SOFT_UNREACHABLE_REPORTER.get() {
+        reporter(message.to_string(), backtrace.to_string(), file, line);
+    }
+}
+
+/// Marks a code path as unreachable without panicking in release builds.
+///
+/// In **debug builds**, this behaves exactly like `unreachable!()` — it panics
+/// so developers catch the issue immediately.
+///
+/// In **release builds**, it:
+/// 1. Logs an error with a backtrace (always).
+/// 2. Reports the event to Sentry **once per call site per session** via the
+///    globally registered reporter (if one has been set via
+///    [`set_soft_unreachable_reporter`]).
+///
+/// The per-call-site deduplication is achieved by expanding a `static Once`
+/// inside the macro, so each invocation site gets its own `Once`.
+///
+/// # Examples
+///
+/// ```ignore
+/// // No message
+/// soft_unreachable!();
+///
+/// // With a format string
+/// soft_unreachable!("unexpected variant: {:?}", value);
+/// ```
+#[macro_export]
+macro_rules! soft_unreachable {
+    () => {{
+        if cfg!(debug_assertions) {
+            unreachable!();
+        } else {
+            static __REPORTED: std::sync::Once = std::sync::Once::new();
+            let message = format_args!( "internal error: entered unreachable code" );
+            log::error!("{message}");
+            __REPORTED.call_once(|| {
+                let backtrace = std::backtrace::Backtrace::force_capture();
+                $crate::report_soft_unreachable(
+                    &message,
+                    &backtrace,
+                    file!(),
+                    line!(),
+                );
+            });
+        }
+    }};
+
+    ( $($fmt_arg:tt)+ ) => {{
+        if cfg!(debug_assertions) {
+            unreachable!( $($fmt_arg)+ );
+        } else {
+            static __REPORTED: std::sync::Once = std::sync::Once::new();
+            let message = format_args!( $($fmt_arg)+ );
+            log::error!("internal error: entered unreachable code: {message}");
+            __REPORTED.call_once(|| {
+                let backtrace = std::backtrace::Backtrace::force_capture();
+                $crate::report_soft_unreachable(
+                    &message,
+                    &backtrace,
+                    file!(),
+                    line!(),
+                );
+            });
+        }
+    }};
+}
+
 #[inline]
 pub const fn is_utf8_char_boundary(u8: u8) -> bool {
     // This is bit magic equivalent to: b < 128 || b >= 192

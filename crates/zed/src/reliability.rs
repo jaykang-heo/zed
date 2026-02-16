@@ -1,5 +1,8 @@
 use anyhow::{Context as _, Result};
-use client::{Client, telemetry::MINIDUMP_ENDPOINT};
+use client::{
+    Client,
+    telemetry::{MINIDUMP_ENDPOINT, SENTRY_DSN},
+};
 use futures::{AsyncReadExt, TryStreamExt};
 use gpui::{App, AppContext as _, SerializedThreadTaskTimings};
 use http_client::{self, AsyncBody, HttpClient, Request};
@@ -19,6 +22,7 @@ use crate::STARTUP_TIME;
 const MAX_HANG_TRACES: usize = 3;
 
 pub fn init(client: Arc<Client>, cx: &mut App) {
+    init_soft_unreachable_reporter(client.clone(), cx);
     monitor_hangs(cx);
 
     if client.telemetry().diagnostics_enabled() {
@@ -64,6 +68,233 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
             })
             .detach_and_log_err(cx);
         })
+    })
+    .detach();
+}
+
+/// Metadata captured at init time for inclusion in Sentry events.
+struct SentryEventMetadata {
+    commit_sha: String,
+    zed_version: String,
+    release_channel: String,
+    binary: String,
+    os_name: String,
+    os_version: String,
+    architecture: &'static str,
+}
+
+/// A message sent from `soft_unreachable!` call sites to the background sender.
+struct SoftUnreachableEvent {
+    message: String,
+    backtrace: String,
+    file: &'static str,
+    line: u32,
+    timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+/// Parses a Sentry DSN of the form `https://{public_key}@{host}/{project_id}`
+/// into a store endpoint URL: `https://{host}/api/{project_id}/store/`
+/// and the public key (sentry_key).
+fn parse_sentry_dsn(dsn: &str) -> Option<(String, String)> {
+    let url = url::Url::parse(dsn).ok()?;
+    let public_key = url.username().to_string();
+    if public_key.is_empty() {
+        return None;
+    }
+    let host = url.host_str()?;
+    let port_suffix = url.port().map(|p| format!(":{}", p)).unwrap_or_default();
+    let scheme = url.scheme();
+
+    // The project ID is the last path segment
+    let project_id = url.path().trim_start_matches('/');
+    if project_id.is_empty() {
+        return None;
+    }
+
+    let store_url = format!(
+        "{}://{}{}/api/{}/store/",
+        scheme, host, port_suffix, project_id
+    );
+    Some((store_url, public_key))
+}
+
+fn build_sentry_event_json(
+    event: &SoftUnreachableEvent,
+    metadata: &SentryEventMetadata,
+    user_id: Option<String>,
+    is_staff: Option<bool>,
+) -> serde_json::Value {
+    let event_id = uuid::Uuid::new_v4().to_string().replace('-', "");
+    let timestamp = event.timestamp.format("%Y-%m-%dT%H:%M:%S%.fZ").to_string();
+    let mut payload = serde_json::json!({
+        "event_id": event_id,
+        "timestamp": timestamp,
+        "level": "error",
+        "platform": "rust",
+        "logger": "soft_unreachable",
+        "release": metadata.commit_sha,
+        "fingerprint": ["soft_unreachable", &event.file, event.line.to_string()],
+        "tags": {
+            "channel": metadata.release_channel,
+            "version": metadata.zed_version,
+            "binary": metadata.binary,
+        },
+        "contexts": {
+            "os": {
+                "type": "os",
+                "name": metadata.os_name,
+                "version": metadata.os_version,
+            },
+            "device": {
+                "type": "device",
+                "arch": metadata.architecture,
+            },
+        },
+        "logentry": {
+            "formatted": event.message,
+        },
+        "extra": {
+            "file": event.file,
+            "line": event.line,
+            "backtrace": event.backtrace,
+        },
+    });
+
+    if let Some(id) = user_id {
+        let mut user = serde_json::json!({ "id": id });
+        if let Some(staff) = is_staff {
+            user["is_staff"] = serde_json::Value::String(staff.to_string());
+        }
+        payload["user"] = user;
+    }
+
+    payload
+}
+
+/// Initialize the soft_unreachable reporter.
+fn init_soft_unreachable_reporter(client: Arc<Client>, cx: &mut App) {
+    // Only report if diagnostics are enabled and we have a Sentry DSN configured.
+    if !client.telemetry().diagnostics_enabled() {
+        return;
+    }
+
+    let Some(dsn) = SENTRY_DSN.as_ref() else {
+        log::debug!("ZED_SENTRY_DSN not set, soft_unreachable events will only be logged locally");
+        return;
+    };
+
+    let Some((store_url, sentry_key)) = parse_sentry_dsn(dsn) else {
+        log::warn!("Failed to parse ZED_SENTRY_DSN, soft_unreachable Sentry reporting disabled");
+        return;
+    };
+
+    let os_version = client::telemetry::os_version();
+
+    let metadata = SentryEventMetadata {
+        commit_sha: release_channel::AppCommitSha::try_global(cx)
+            .map(|sha| sha.full())
+            .unwrap_or_else(|| "unknown".to_owned()),
+        zed_version: release_channel::AppVersion::global(cx).to_string(),
+        release_channel: release_channel::RELEASE_CHANNEL_NAME.clone(),
+        binary: "zed".to_owned(),
+        os_name: client::telemetry::os_name(),
+        os_version,
+        architecture: std::env::consts::ARCH,
+    };
+
+    let (tx, mut rx) = futures::channel::mpsc::unbounded::<SoftUnreachableEvent>();
+
+    // Register the global reporter callback in `util`, capturing the sender
+    // directly in the closure.
+    util::set_soft_unreachable_reporter(move |message, backtrace, file, line| {
+        tx.unbounded_send(SoftUnreachableEvent {
+            message,
+            backtrace,
+            file,
+            line,
+            timestamp: chrono::Utc::now(),
+        })
+        .ok();
+    });
+
+    let http_client = client.http_client();
+    let telemetry = client.telemetry().clone();
+
+    // Spawn a background task that drains the channel and sends events to Sentry.
+    cx.background_spawn(async move {
+        while let Some(event) = futures::StreamExt::next(&mut rx).await {
+            let user_id = telemetry
+                .metrics_id()
+                .map(|id| id.to_string())
+                .or_else(|| {
+                    telemetry
+                        .installation_id()
+                        .map(|id| format!("installation-{}", id))
+                });
+            let is_staff = telemetry.is_staff();
+
+            let payload = build_sentry_event_json(&event, &metadata, user_id, is_staff);
+
+            let body = match serde_json::to_vec(&payload) {
+                Ok(b) => b,
+                Err(e) => {
+                    log::error!("Failed to serialize soft_unreachable Sentry event: {e}");
+                    continue;
+                }
+            };
+
+            let req = match Request::builder()
+                .method(Method::POST)
+                .uri(&store_url)
+                .header("Content-Type", "application/json")
+                .header(
+                    "X-Sentry-Auth",
+                    format!(
+                        "Sentry sentry_version=7, sentry_client=zed-soft-unreachable/1.0, sentry_key={}",
+                        sentry_key
+                    ),
+                )
+                .body(AsyncBody::from(body))
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log::error!("Failed to build soft_unreachable Sentry request: {e}");
+                    continue;
+                }
+            };
+
+            match async {
+                let mut response = http_client.send(req).await?;
+                let mut response_text = String::new();
+                response
+                    .body_mut()
+                    .read_to_string(&mut response_text)
+                    .await?;
+                if !response.status().is_success() {
+                    anyhow::bail!(
+                        "Sentry store returned {}: {}",
+                        response.status(),
+                        response_text
+                    );
+                }
+                anyhow::Ok(response_text)
+            }
+            .await
+            {
+                Ok(response_text) => {
+                    log::info!(
+                        "Reported soft_unreachable to Sentry ({}:{}): event {}",
+                        event.file,
+                        event.line,
+                        response_text
+                    );
+                }
+                Err(e) => {
+                    log::error!("Failed to report soft_unreachable to Sentry: {e}");
+                }
+            }
+        }
+        log::debug!("soft_unreachable Sentry reporter task exiting");
     })
     .detach();
 }
@@ -392,5 +623,131 @@ impl FormExt for Form {
             Some(value) => self.text(label.into(), value.into()),
             None => self,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_sentry_dsn_valid() {
+        let (store_url, key) =
+            parse_sentry_dsn("https://abc123@o123456.ingest.sentry.io/7654321").unwrap();
+        assert_eq!(
+            store_url,
+            "https://o123456.ingest.sentry.io/api/7654321/store/"
+        );
+        assert_eq!(key, "abc123");
+    }
+
+    #[test]
+    fn test_parse_sentry_dsn_with_port() {
+        let (store_url, key) =
+            parse_sentry_dsn("https://mykey@sentry.example.com:9000/42").unwrap();
+        assert_eq!(store_url, "https://sentry.example.com:9000/api/42/store/");
+        assert_eq!(key, "mykey");
+    }
+
+    #[test]
+    fn test_parse_sentry_dsn_invalid_no_key() {
+        assert!(parse_sentry_dsn("https://sentry.io/123").is_none());
+    }
+
+    #[test]
+    fn test_parse_sentry_dsn_invalid_no_project() {
+        assert!(parse_sentry_dsn("https://key@sentry.io/").is_none());
+        assert!(parse_sentry_dsn("https://key@sentry.io").is_none());
+    }
+
+    #[test]
+    fn test_parse_sentry_dsn_invalid_url() {
+        assert!(parse_sentry_dsn("not a url at all").is_none());
+    }
+
+    fn test_metadata() -> SentryEventMetadata {
+        SentryEventMetadata {
+            commit_sha: "abc123def".to_owned(),
+            zed_version: "1.2.3".to_owned(),
+            release_channel: "stable".to_owned(),
+            binary: "zed".to_owned(),
+            os_name: "macOS".to_owned(),
+            os_version: "15.0".to_owned(),
+            architecture: "aarch64",
+        }
+    }
+
+    fn test_event() -> SoftUnreachableEvent {
+        SoftUnreachableEvent {
+            message: "unexpected variant: Foo".to_owned(),
+            backtrace: "  0: some::frame\n  1: another::frame".to_owned(),
+            file: "crates/editor/src/editor.rs",
+            line: 42,
+            timestamp: chrono::DateTime::parse_from_rfc3339("2025-01-15T12:30:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        }
+    }
+
+    #[test]
+    fn test_build_sentry_event_json_basic_fields() {
+        let event = test_event();
+        let metadata = test_metadata();
+        let payload = build_sentry_event_json(&event, &metadata, None, None);
+
+        assert_eq!(payload["level"], "error");
+        assert_eq!(payload["platform"], "rust");
+        assert_eq!(payload["logger"], "soft_unreachable");
+        assert_eq!(payload["release"], "abc123def");
+        assert_eq!(payload["timestamp"], "2025-01-15T12:30:00Z");
+
+        assert_eq!(payload["tags"]["channel"], "stable");
+        assert_eq!(payload["tags"]["version"], "1.2.3");
+        assert_eq!(payload["tags"]["binary"], "zed");
+
+        assert_eq!(payload["contexts"]["os"]["name"], "macOS");
+        assert_eq!(payload["contexts"]["os"]["version"], "15.0");
+        assert_eq!(payload["contexts"]["device"]["arch"], "aarch64");
+
+        assert_eq!(payload["logentry"]["formatted"], "unexpected variant: Foo");
+
+        assert_eq!(payload["extra"]["file"], "crates/editor/src/editor.rs");
+        assert_eq!(payload["extra"]["line"], 42);
+        assert!(
+            payload["extra"]["backtrace"]
+                .as_str()
+                .unwrap()
+                .contains("some::frame")
+        );
+
+        let fingerprint = payload["fingerprint"].as_array().unwrap();
+        assert_eq!(fingerprint[0], "soft_unreachable");
+        assert_eq!(fingerprint[1], "crates/editor/src/editor.rs");
+        assert_eq!(fingerprint[2], "42");
+
+        assert!(payload["event_id"].as_str().unwrap().len() == 32);
+        assert!(payload.get("user").is_none());
+    }
+
+    #[test]
+    fn test_build_sentry_event_json_with_user_and_staff() {
+        let event = test_event();
+        let metadata = test_metadata();
+        let payload =
+            build_sentry_event_json(&event, &metadata, Some("user-123".to_owned()), Some(true));
+
+        assert_eq!(payload["user"]["id"], "user-123");
+        assert_eq!(payload["user"]["is_staff"], "true");
+    }
+
+    #[test]
+    fn test_build_sentry_event_json_with_user_no_staff() {
+        let event = test_event();
+        let metadata = test_metadata();
+        let payload =
+            build_sentry_event_json(&event, &metadata, Some("installation-abc".to_owned()), None);
+
+        assert_eq!(payload["user"]["id"], "installation-abc");
+        assert!(payload["user"].get("is_staff").is_none());
     }
 }
