@@ -350,16 +350,26 @@ fn compute_cursor_metrics_from_mapped(
 pub fn print_report(examples: &[Example]) {
     use crate::metrics::ClassificationMetrics;
 
-    const LINE_WIDTH: usize = 111;
+    const LINE_WIDTH: usize = 119;
     let separator = "─".repeat(LINE_WIDTH);
 
     println!("{}", separator);
     println!(
-        "{:<50} {:>8} {:>5} {:>7} {:>7} {:>7} {:>7} {:>6} {:>5}",
-        "Example", "DeltaChrF", "Brace", "F1", "Revert", "QaRev", "QaConf", "Cursor", "WrgER"
+        "{:<50} {:>7} {:>8} {:>5} {:>7} {:>7} {:>7} {:>7} {:>6} {:>5}",
+        "Example",
+        "EditPct",
+        "DeltaChrF",
+        "Brace",
+        "F1",
+        "Revert",
+        "QaRev",
+        "QaConf",
+        "Cursor",
+        "WrgER"
     );
     println!("{}", separator);
 
+    let mut all_edit_distance_pcts = Vec::new();
     let mut all_delta_chr_f_scores = Vec::new();
     let mut all_reversal_ratios = Vec::new();
     let mut braces_disbalance_sum: usize = 0;
@@ -415,9 +425,16 @@ pub fn print_report(examples: &[Example]) {
                 (None, _) => "-".to_string(),
             };
 
+            // Format edit distance percentage
+            let edit_pct_str = match score.edit_distance_percentage {
+                Some(pct) => format!("{:.0}%", pct),
+                None => "-".to_string(),
+            };
+
             println!(
-                "{:<50} {:>8.2} {:>5} {:>6.1}% {:>6.1}% {:>7} {:>7} {:>6} {:>5}",
+                "{:<50} {:>7} {:>8.2} {:>5} {:>6.1}% {:>6.1}% {:>7} {:>7} {:>6} {:>5}",
                 truncate_name(&example.spec.name, 50),
+                edit_pct_str,
                 score.delta_chr_f,
                 score.braces_disbalance,
                 exact_lines.f1() * 100.0,
@@ -428,6 +445,9 @@ pub fn print_report(examples: &[Example]) {
                 wrong_er_str
             );
 
+            if let Some(pct) = score.edit_distance_percentage {
+                all_edit_distance_pcts.push(pct);
+            }
             all_delta_chr_f_scores.push(score.delta_chr_f);
             all_reversal_ratios.push(score.reversal_ratio);
             total_scores += 1;
@@ -492,6 +512,16 @@ pub fn print_report(examples: &[Example]) {
     println!("{}", separator);
 
     if !all_delta_chr_f_scores.is_empty() {
+        let avg_edit_distance_pct: f32 = if !all_edit_distance_pcts.is_empty() {
+            all_edit_distance_pcts.iter().sum::<f32>() / all_edit_distance_pcts.len() as f32
+        } else {
+            0.0
+        };
+        let avg_edit_pct_str = if !all_edit_distance_pcts.is_empty() {
+            format!("{:.0}%", avg_edit_distance_pct)
+        } else {
+            "-".to_string()
+        };
         let avg_delta_chr_f: f32 =
             all_delta_chr_f_scores.iter().sum::<f32>() / all_delta_chr_f_scores.len() as f32;
         let avg_reversal_ratio: f32 =
@@ -552,8 +582,9 @@ pub fn print_report(examples: &[Example]) {
         };
 
         println!(
-            "{:<50} {:>8.2} {:>5.1} {:>6.1}% {:>6.1}% {:>7} {:>7} {:>6} {:>5}",
+            "{:<50} {:>7} {:>8.2} {:>5.1} {:>6.1}% {:>6.1}% {:>7} {:>7} {:>6} {:>5}",
             "TOTAL / AVERAGE",
+            avg_edit_pct_str,
             avg_delta_chr_f,
             braces_disbalance_avg,
             total_exact_lines.f1() * 100.0,
