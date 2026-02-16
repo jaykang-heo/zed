@@ -303,7 +303,7 @@ fn load_shell_from_passwd() -> Result<()> {
 }
 
 /// Returns a shell escaped path for the current zed executable
-pub fn get_shell_safe_zed_path(shell_kind: Option<&shell::ShellKind>) -> anyhow::Result<String> {
+pub fn get_shell_safe_zed_path(shell_kind: shell::ShellKind) -> anyhow::Result<String> {
     let mut zed_path =
         std::env::current_exe().context("Failed to determine current zed executable path.")?;
     if cfg!(target_os = "linux")
@@ -409,8 +409,6 @@ pub fn set_pre_exec_to_start_new_session(
         use std::os::unix::process::CommandExt;
         command.pre_exec(|| {
             libc::setsid();
-            #[cfg(target_os = "macos")]
-            crate::command::reset_exception_ports();
             Ok(())
         });
     };
