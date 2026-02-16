@@ -64,7 +64,13 @@ async fn test_current_state(cx: &mut TestAppContext) {
     // Prediction for current file
 
     ep_store.update(cx, |ep_store, cx| {
-        ep_store.refresh_prediction_from_buffer(project.clone(), buffer1.clone(), position, cx)
+        ep_store.refresh_prediction_from_buffer(
+            project.clone(),
+            buffer1.clone(),
+            position,
+            false,
+            cx,
+        )
     });
     let (request, respond_tx) = requests.predict.next().await.unwrap();
 
@@ -191,7 +197,7 @@ async fn test_simple_request(cx: &mut TestAppContext) {
     let position = snapshot.anchor_before(language::Point::new(1, 3));
 
     let prediction_task = ep_store.update(cx, |ep_store, cx| {
-        ep_store.request_prediction(&project, &buffer, position, Default::default(), cx)
+        ep_store.request_prediction(&project, &buffer, position, Default::default(), false, cx)
     });
 
     let (request, respond_tx) = requests.predict.next().await.unwrap();
@@ -267,7 +273,7 @@ async fn test_request_events(cx: &mut TestAppContext) {
     let position = snapshot.anchor_before(language::Point::new(1, 3));
 
     let prediction_task = ep_store.update(cx, |ep_store, cx| {
-        ep_store.request_prediction(&project, &buffer, position, Default::default(), cx)
+        ep_store.request_prediction(&project, &buffer, position, Default::default(), false, cx)
     });
 
     let (request, respond_tx) = requests.predict.next().await.unwrap();
@@ -871,7 +877,13 @@ async fn test_empty_prediction(cx: &mut TestAppContext) {
     let position = snapshot.anchor_before(language::Point::new(1, 3));
 
     ep_store.update(cx, |ep_store, cx| {
-        ep_store.refresh_prediction_from_buffer(project.clone(), buffer.clone(), position, cx);
+        ep_store.refresh_prediction_from_buffer(
+            project.clone(),
+            buffer.clone(),
+            position,
+            false,
+            cx,
+        );
     });
 
     let (request, respond_tx) = requests.predict.next().await.unwrap();
@@ -926,7 +938,13 @@ async fn test_interpolated_empty(cx: &mut TestAppContext) {
     let position = snapshot.anchor_before(language::Point::new(1, 3));
 
     ep_store.update(cx, |ep_store, cx| {
-        ep_store.refresh_prediction_from_buffer(project.clone(), buffer.clone(), position, cx);
+        ep_store.refresh_prediction_from_buffer(
+            project.clone(),
+            buffer.clone(),
+            position,
+            false,
+            cx,
+        );
     });
 
     let (request, respond_tx) = requests.predict.next().await.unwrap();
@@ -996,7 +1014,13 @@ async fn test_replace_current(cx: &mut TestAppContext) {
     let position = snapshot.anchor_before(language::Point::new(1, 3));
 
     ep_store.update(cx, |ep_store, cx| {
-        ep_store.refresh_prediction_from_buffer(project.clone(), buffer.clone(), position, cx);
+        ep_store.refresh_prediction_from_buffer(
+            project.clone(),
+            buffer.clone(),
+            position,
+            false,
+            cx,
+        );
     });
 
     let (request, respond_tx) = requests.predict.next().await.unwrap();
@@ -1019,7 +1043,13 @@ async fn test_replace_current(cx: &mut TestAppContext) {
 
     // a second request is triggered
     ep_store.update(cx, |ep_store, cx| {
-        ep_store.refresh_prediction_from_buffer(project.clone(), buffer.clone(), position, cx);
+        ep_store.refresh_prediction_from_buffer(
+            project.clone(),
+            buffer.clone(),
+            position,
+            false,
+            cx,
+        );
     });
 
     let (request, respond_tx) = requests.predict.next().await.unwrap();
@@ -1078,7 +1108,13 @@ async fn test_current_preferred(cx: &mut TestAppContext) {
     let position = snapshot.anchor_before(language::Point::new(1, 3));
 
     ep_store.update(cx, |ep_store, cx| {
-        ep_store.refresh_prediction_from_buffer(project.clone(), buffer.clone(), position, cx);
+        ep_store.refresh_prediction_from_buffer(
+            project.clone(),
+            buffer.clone(),
+            position,
+            false,
+            cx,
+        );
     });
 
     let (request, respond_tx) = requests.predict.next().await.unwrap();
@@ -1101,7 +1137,13 @@ async fn test_current_preferred(cx: &mut TestAppContext) {
 
     // a second request is triggered
     ep_store.update(cx, |ep_store, cx| {
-        ep_store.refresh_prediction_from_buffer(project.clone(), buffer.clone(), position, cx);
+        ep_store.refresh_prediction_from_buffer(
+            project.clone(),
+            buffer.clone(),
+            position,
+            false,
+            cx,
+        );
     });
 
     let (request, respond_tx) = requests.predict.next().await.unwrap();
@@ -1173,13 +1215,25 @@ async fn test_cancel_earlier_pending_requests(cx: &mut TestAppContext) {
 
     // start two refresh tasks
     ep_store.update(cx, |ep_store, cx| {
-        ep_store.refresh_prediction_from_buffer(project.clone(), buffer.clone(), position, cx);
+        ep_store.refresh_prediction_from_buffer(
+            project.clone(),
+            buffer.clone(),
+            position,
+            false,
+            cx,
+        );
     });
 
     let (request1, respond_first) = requests.predict.next().await.unwrap();
 
     ep_store.update(cx, |ep_store, cx| {
-        ep_store.refresh_prediction_from_buffer(project.clone(), buffer.clone(), position, cx);
+        ep_store.refresh_prediction_from_buffer(
+            project.clone(),
+            buffer.clone(),
+            position,
+            false,
+            cx,
+        );
     });
 
     let (request, respond_second) = requests.predict.next().await.unwrap();
@@ -1264,13 +1318,25 @@ async fn test_cancel_second_on_third_request(cx: &mut TestAppContext) {
 
     // start two refresh tasks
     ep_store.update(cx, |ep_store, cx| {
-        ep_store.refresh_prediction_from_buffer(project.clone(), buffer.clone(), position, cx);
+        ep_store.refresh_prediction_from_buffer(
+            project.clone(),
+            buffer.clone(),
+            position,
+            false,
+            cx,
+        );
     });
 
     let (request1, respond_first) = requests.predict.next().await.unwrap();
 
     ep_store.update(cx, |ep_store, cx| {
-        ep_store.refresh_prediction_from_buffer(project.clone(), buffer.clone(), position, cx);
+        ep_store.refresh_prediction_from_buffer(
+            project.clone(),
+            buffer.clone(),
+            position,
+            false,
+            cx,
+        );
     });
 
     let (request2, respond_second) = requests.predict.next().await.unwrap();
@@ -1280,7 +1346,13 @@ async fn test_cancel_second_on_third_request(cx: &mut TestAppContext) {
 
     ep_store.update(cx, |ep_store, cx| {
         // start a third request
-        ep_store.refresh_prediction_from_buffer(project.clone(), buffer.clone(), position, cx);
+        ep_store.refresh_prediction_from_buffer(
+            project.clone(),
+            buffer.clone(),
+            position,
+            false,
+            cx,
+        );
 
         // 2 are pending, so 2nd is cancelled
         assert_eq!(
@@ -1707,6 +1779,7 @@ async fn test_edit_prediction_basic_interpolation(cx: &mut TestAppContext) {
             excerpt_start_row: None,
             excerpt_ranges: None,
             preferred_model: None,
+            force: false,
             in_open_source_repo: false,
         },
         buffer_snapshotted_at: Instant::now(),
@@ -1896,7 +1969,13 @@ async fn test_edit_prediction_no_spurious_trailing_newline(cx: &mut TestAppConte
     let position = snapshot.anchor_before(language::Point::new(0, 5));
 
     ep_store.update(cx, |ep_store, cx| {
-        ep_store.refresh_prediction_from_buffer(project.clone(), buffer.clone(), position, cx);
+        ep_store.refresh_prediction_from_buffer(
+            project.clone(),
+            buffer.clone(),
+            position,
+            false,
+            cx,
+        );
     });
 
     let (_request, respond_tx) = requests.predict.next().await.unwrap();
@@ -1964,7 +2043,7 @@ async fn run_edit_prediction(
     });
     cx.background_executor.run_until_parked();
     let prediction_task = ep_store.update(cx, |ep_store, cx| {
-        ep_store.request_prediction(&project, buffer, cursor, Default::default(), cx)
+        ep_store.request_prediction(&project, buffer, cursor, Default::default(), false, cx)
     });
     prediction_task.await.unwrap().unwrap().prediction.unwrap()
 }
@@ -2123,7 +2202,7 @@ async fn test_unauthenticated_without_custom_url_blocks_prediction_impl(cx: &mut
 
     let completion_task = ep_store.update(cx, |ep_store, cx| {
         ep_store.set_edit_prediction_model(EditPredictionModel::Zeta1);
-        ep_store.request_prediction(&project, &buffer, cursor, Default::default(), cx)
+        ep_store.request_prediction(&project, &buffer, cursor, Default::default(), false, cx)
     });
 
     let result = completion_task.await;

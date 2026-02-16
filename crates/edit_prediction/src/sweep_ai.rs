@@ -222,6 +222,7 @@ impl SweepAi {
                 excerpt_ranges: None,
                 preferred_model: None,
                 in_open_source_repo: false,
+                force: false,
             };
 
             send_started_event(

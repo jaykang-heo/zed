@@ -221,6 +221,7 @@ impl EditPredictionDelegate for CodestralEditPredictionDelegate {
         buffer: Entity<Buffer>,
         cursor_position: language::Anchor,
         debounce: bool,
+        _force: bool,
         cx: &mut Context<Self>,
     ) {
         log::debug!("Codestral: Refresh called (debounce: {})", debounce);

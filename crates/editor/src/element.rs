@@ -622,6 +622,7 @@ impl EditorElement {
         register_action(editor, window, Editor::signature_help_prev);
         register_action(editor, window, Editor::signature_help_next);
         register_action(editor, window, Editor::show_edit_prediction);
+        register_action(editor, window, Editor::show_forced_edit_prediction);
         register_action(editor, window, Editor::context_menu_first);
         register_action(editor, window, Editor::context_menu_prev);
         register_action(editor, window, Editor::context_menu_next);

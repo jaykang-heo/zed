@@ -149,6 +149,7 @@ impl EditPredictionDelegate for SupermavenEditPredictionDelegate {
         buffer_handle: Entity<Buffer>,
         cursor_position: Anchor,
         debounce: bool,
+        _force: bool,
         cx: &mut Context<Self>,
     ) {
         // Only make new completion requests when debounce is true (i.e., when text is typed)

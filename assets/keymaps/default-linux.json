@@ -169,6 +169,12 @@
     },
   },
   {
+    "context": "Editor",
+    "bindings": {
+      "alt-shift-\\": "editor::ForceEditPrediction",
+    },
+  },
+  {
     "context": "Editor && mode == auto_height",
     "bindings": {
       "ctrl-enter": "editor::Newline",

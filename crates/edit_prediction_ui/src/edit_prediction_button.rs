@@ -6,7 +6,9 @@ use copilot::Status;
 use edit_prediction::{EditPredictionStore, Zeta2FeatureFlag};
 use edit_prediction_types::EditPredictionDelegateHandle;
 use editor::{
-    Editor, MultiBufferOffset, SelectionEffects, actions::ShowEditPrediction, scroll::Autoscroll,
+    Editor, MultiBufferOffset, SelectionEffects,
+    actions::{ForceEditPrediction, ShowEditPrediction},
+    scroll::Autoscroll,
 };
 use feature_flags::FeatureFlagAppExt;
 use fs::Fs;
@@ -1029,6 +1031,26 @@ impl EditPredictionButton {
                         }
                     },
                 )
+                .when(cx.is_staff(), |menu| {
+                    menu.entry(
+                        "Force Predict Edit at Cursor",
+                        Some(Box::new(ForceEditPrediction)),
+                        {
+                            let editor_focus_handle = editor_focus_handle.clone();
+                            move |window, cx| {
+                                telemetry::event!(
+                                    "Edit Prediction Menu Action",
+                                    action = "force_predict_at_cursor",
+                                );
+                                editor_focus_handle.dispatch_action(
+                                    &ForceEditPrediction,
+                                    window,
+                                    cx,
+                                );
+                            }
+                        },
+                    )
+                })
                 .context(editor_focus_handle)
                 .when(
                     cx.has_flag::<PredictEditsRatePredictionsFeatureFlag>(),

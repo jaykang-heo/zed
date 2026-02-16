@@ -3276,7 +3276,7 @@ impl Editor {
             provider: Arc::new(provider),
         });
         self.update_edit_prediction_settings(cx);
-        self.refresh_edit_prediction(false, false, window, cx);
+        self.refresh_edit_prediction(false, false, false, window, cx);
     }
 
     pub fn placeholder_text(&self, cx: &mut App) -> Option<String> {
@@ -3373,7 +3373,7 @@ impl Editor {
             if hidden {
                 self.update_visible_edit_prediction(window, cx);
             } else {
-                self.refresh_edit_prediction(true, false, window, cx);
+                self.refresh_edit_prediction(true, false, false, window, cx);
             }
         }
     }
@@ -3462,7 +3462,7 @@ impl Editor {
         if let Some(false) = show_edit_predictions {
             self.discard_edit_prediction(EditPredictionDiscardReason::Ignored, cx);
         } else {
-            self.refresh_edit_prediction(false, true, window, cx);
+            self.refresh_edit_prediction(false, true, false, window, cx);
         }
     }
 
@@ -5041,7 +5041,7 @@ impl Editor {
             }
             this.trigger_completion_on_input(&text, trigger_in_words, window, cx);
             refresh_linked_ranges(this, window, cx);
-            this.refresh_edit_prediction(true, false, window, cx);
+            this.refresh_edit_prediction(true, false, false, window, cx);
             jsx_tag_auto_close::handle_from(this, initial_buffer_versions, window, cx);
         });
     }
@@ -5288,7 +5288,7 @@ impl Editor {
                 .collect();
 
             this.change_selections(Default::default(), window, cx, |s| s.select(new_selections));
-            this.refresh_edit_prediction(true, false, window, cx);
+            this.refresh_edit_prediction(true, false, false, window, cx);
             if let Some(task) = this.trigger_on_type_formatting("\n".to_owned(), window, cx) {
                 task.detach_and_log_err(cx);
             }
@@ -6498,7 +6498,7 @@ impl Editor {
                 })
             }
 
-            editor.refresh_edit_prediction(true, false, window, cx);
+            editor.refresh_edit_prediction(true, false, false, window, cx);
         });
         self.invalidate_autoclose_regions(&self.selections.disjoint_anchors_arc(), &snapshot);
 
@@ -7743,6 +7743,7 @@ impl Editor {
         &mut self,
         debounce: bool,
         user_requested: bool,
+        force: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<()> {
@@ -7771,7 +7772,7 @@ impl Editor {
             return None;
         }
 
-        provider.refresh(buffer, cursor_buffer_position, debounce, cx);
+        provider.refresh(buffer, cursor_buffer_position, debounce, force, cx);
         Some(())
     }
 
@@ -7914,7 +7915,21 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         if !self.has_active_edit_prediction() {
-            self.refresh_edit_prediction(false, true, window, cx);
+            self.refresh_edit_prediction(false, true, false, window, cx);
+            return;
+        }
+
+        self.update_visible_edit_prediction(window, cx);
+    }
+
+    pub fn show_forced_edit_prediction(
+        &mut self,
+        _: &ForceEditPrediction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.has_active_edit_prediction() {
+            self.refresh_edit_prediction(false, true, true, window, cx);
             return;
         }
 
@@ -8142,7 +8157,7 @@ impl Editor {
 
                         self.update_visible_edit_prediction(window, cx);
                         if self.active_edit_prediction.is_none() {
-                            self.refresh_edit_prediction(true, true, window, cx);
+                            self.refresh_edit_prediction(true, true, false, window, cx);
                         }
                         cx.notify();
                     }
@@ -8195,7 +8210,7 @@ impl Editor {
                             });
 
                             self.insert_with_autoindent_mode(&text_to_insert, None, window, cx);
-                            self.refresh_edit_prediction(true, true, window, cx);
+                            self.refresh_edit_prediction(true, true, false, window, cx);
                             cx.notify();
                         } else {
                             self.accept_partial_edit_prediction(
@@ -10911,7 +10926,7 @@ impl Editor {
                     this.edit(edits, None, cx);
                 })
             }
-            this.refresh_edit_prediction(true, false, window, cx);
+            this.refresh_edit_prediction(true, false, false, window, cx);
             refresh_linked_ranges(this, window, cx);
         });
     }
@@ -10933,7 +10948,7 @@ impl Editor {
                 })
             });
             this.insert("", window, cx);
-            this.refresh_edit_prediction(true, false, window, cx);
+            this.refresh_edit_prediction(true, false, false, window, cx);
         });
     }
 
@@ -10964,7 +10979,7 @@ impl Editor {
         if self.move_to_next_snippet_tabstop(window, cx) {
             self.hide_mouse_cursor(HideMouseCursorOrigin::TypingAction, cx);
             if self.snippet_stack.is_empty() {
-                self.refresh_edit_prediction(true, false, window, cx);
+                self.refresh_edit_prediction(true, false, false, window, cx);
             }
             return;
         }
@@ -11121,7 +11136,7 @@ impl Editor {
         self.transact(window, cx, |this, window, cx| {
             this.buffer.update(cx, |b, cx| b.edit(edits, None, cx));
             this.change_selections(Default::default(), window, cx, |s| s.select(selections));
-            this.refresh_edit_prediction(true, false, window, cx);
+            this.refresh_edit_prediction(true, false, false, window, cx);
         });
     }
 
@@ -14096,7 +14111,7 @@ impl Editor {
             }
             self.request_autoscroll(Autoscroll::fit(), cx);
             self.unmark_text(window, cx);
-            self.refresh_edit_prediction(true, false, window, cx);
+            self.refresh_edit_prediction(true, false, false, window, cx);
             cx.emit(EditorEvent::Edited { transaction_id });
             cx.emit(EditorEvent::TransactionUndone { transaction_id });
         }
@@ -14126,7 +14141,7 @@ impl Editor {
             }
             self.request_autoscroll(Autoscroll::fit(), cx);
             self.unmark_text(window, cx);
-            self.refresh_edit_prediction(true, false, window, cx);
+            self.refresh_edit_prediction(true, false, false, window, cx);
             cx.emit(EditorEvent::Edited { transaction_id });
         }
     }
@@ -17717,7 +17732,7 @@ impl Editor {
             ])
         });
         self.activate_diagnostics(buffer_id, next_diagnostic, window, cx);
-        self.refresh_edit_prediction(false, true, window, cx);
+        self.refresh_edit_prediction(false, true, false, window, cx);
     }
 
     pub fn go_to_next_hunk(&mut self, _: &GoToHunk, window: &mut Window, cx: &mut Context<Self>) {
@@ -23274,7 +23289,7 @@ impl Editor {
                     (selection.range(), uuid.to_string())
                 });
             this.edit(edits, cx);
-            this.refresh_edit_prediction(true, false, window, cx);
+            this.refresh_edit_prediction(true, false, false, window, cx);
         });
     }
 
@@ -24325,7 +24340,7 @@ impl Editor {
         }
         self.tasks_update_task = Some(self.refresh_runnables(window, cx));
         self.update_edit_prediction_settings(cx);
-        self.refresh_edit_prediction(true, false, window, cx);
+        self.refresh_edit_prediction(true, false, false, window, cx);
         self.refresh_inline_values(cx);
 
         let old_cursor_shape = self.cursor_shape;

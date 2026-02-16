@@ -164,6 +164,7 @@ pub struct EditPredictionModelInput {
     related_files: Vec<RelatedFile>,
     recent_paths: VecDeque<ProjectPath>,
     trigger: PredictEditsRequestTrigger,
+    force: bool,
     diagnostic_search_range: Range<Point>,
     debug_tx: Option<mpsc::UnboundedSender<DebugEvent>>,
     pub user_actions: Vec<UserActionRecord>,
@@ -1455,6 +1456,7 @@ impl EditPredictionStore {
         project: Entity<Project>,
         buffer: Entity<Buffer>,
         position: language::Anchor,
+        force: bool,
         cx: &mut Context<Self>,
     ) {
         self.queue_prediction_refresh(project.clone(), buffer.entity_id(), cx, move |this, cx| {
@@ -1465,6 +1467,7 @@ impl EditPredictionStore {
                         &buffer,
                         position,
                         PredictEditsRequestTrigger::Other,
+                        force,
                         cx,
                     )
                 })
@@ -1544,6 +1547,7 @@ impl EditPredictionStore {
                             &jump_buffer,
                             jump_position,
                             PredictEditsRequestTrigger::Diagnostics,
+                            false,
                             cx,
                         )
                     })?
@@ -1763,6 +1767,7 @@ impl EditPredictionStore {
         active_buffer: &Entity<Buffer>,
         position: language::Anchor,
         trigger: PredictEditsRequestTrigger,
+        force: bool,
         cx: &mut Context<Self>,
     ) -> Task<Result<Option<EditPredictionResult>>> {
         self.request_prediction_internal(
@@ -1771,6 +1776,7 @@ impl EditPredictionStore {
             position,
             trigger,
             cx.has_flag::<Zeta2FeatureFlag>(),
+            force,
             cx,
         )
     }
@@ -1782,6 +1788,7 @@ impl EditPredictionStore {
         position: language::Anchor,
         trigger: PredictEditsRequestTrigger,
         allow_jump: bool,
+        force: bool,
         cx: &mut Context<Self>,
     ) -> Task<Result<Option<EditPredictionResult>>> {
         const DIAGNOSTIC_LINES_RANGE: u32 = 20;
@@ -1837,6 +1844,7 @@ impl EditPredictionStore {
             diagnostic_search_range: diagnostic_search_range.clone(),
             debug_tx,
             user_actions,
+            force,
         };
 
         let task = match &self.edit_prediction_model {
@@ -1881,6 +1889,7 @@ impl EditPredictionStore {
                                 jump_position,
                                 trigger,
                                 false,
+                                force,
                                 cx,
                             )
                         })?

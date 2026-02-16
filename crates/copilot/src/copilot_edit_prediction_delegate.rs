@@ -78,6 +78,7 @@ impl EditPredictionDelegate for CopilotEditPredictionDelegate {
         buffer: Entity<Buffer>,
         cursor_position: language::Anchor,
         debounce: bool,
+        _force: bool,
         cx: &mut Context<Self>,
     ) {
         let copilot = self.copilot.clone();
@@ -999,7 +1000,7 @@ mod tests {
             editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
                 selections.select_ranges([Point::new(0, 0)..Point::new(0, 0)])
             });
-            editor.refresh_edit_prediction(true, false, window, cx);
+            editor.refresh_edit_prediction(true, false, false, window, cx);
         });
 
         executor.advance_clock(COPILOT_DEBOUNCE_TIMEOUT);
@@ -1009,7 +1010,7 @@ mod tests {
             editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
                 s.select_ranges([Point::new(5, 0)..Point::new(5, 0)])
             });
-            editor.refresh_edit_prediction(true, false, window, cx);
+            editor.refresh_edit_prediction(true, false, false, window, cx);
         });
 
         executor.advance_clock(COPILOT_DEBOUNCE_TIMEOUT);

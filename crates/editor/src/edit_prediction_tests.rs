@@ -620,6 +620,7 @@ impl EditPredictionDelegate for FakeEditPredictionDelegate {
         _buffer: gpui::Entity<language::Buffer>,
         _cursor_position: language::Anchor,
         _debounce: bool,
+        _force: bool,
         _cx: &mut gpui::Context<Self>,
     ) {
     }
@@ -696,6 +697,7 @@ impl EditPredictionDelegate for FakeNonZedEditPredictionDelegate {
         _buffer: gpui::Entity<language::Buffer>,
         _cursor_position: language::Anchor,
         _debounce: bool,
+        _force: bool,
         _cx: &mut gpui::Context<Self>,
     ) {
     }

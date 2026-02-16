@@ -198,6 +198,7 @@ pub trait EditPredictionDelegate: 'static + Sized {
         buffer: Entity<Buffer>,
         cursor_position: language::Anchor,
         debounce: bool,
+        force: bool,
         cx: &mut Context<Self>,
     );
     fn accept(&mut self, cx: &mut Context<Self>);
@@ -233,6 +234,7 @@ pub trait EditPredictionDelegateHandle {
         buffer: Entity<Buffer>,
         cursor_position: language::Anchor,
         debounce: bool,
+        force: bool,
         cx: &mut App,
     );
     fn did_show(&self, display_type: SuggestionDisplayType, cx: &mut App);
@@ -304,10 +306,11 @@ where
         buffer: Entity<Buffer>,
         cursor_position: language::Anchor,
         debounce: bool,
+        force: bool,
         cx: &mut App,
     ) {
         self.update(cx, |this, cx| {
-            this.refresh(buffer, cursor_position, debounce, cx)
+            this.refresh(buffer, cursor_position, debounce, force, cx)
         })
     }
 

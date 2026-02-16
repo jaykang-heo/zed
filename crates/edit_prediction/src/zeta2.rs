@@ -18,8 +18,9 @@ use std::env;
 use std::ops::Range;
 use std::{path::Path, sync::Arc, time::Instant};
 use zeta_prompt::{
-    CURSOR_MARKER, SELECTION_START_MARKER, EditPredictionModelKind, ZetaFormat, clean_zeta2_model_output,
-    format_zeta_prompt, get_prefill, prompt_input_contains_special_tokens,
+    CURSOR_MARKER, EditPredictionModelKind, SELECTION_START_MARKER, ZetaFormat,
+    clean_zeta2_model_output, format_zeta_prompt, get_prefill,
+    prompt_input_contains_special_tokens,
 };
 
 pub const MAX_CONTEXT_TOKENS: usize = 350;
@@ -46,6 +47,7 @@ pub fn request_prediction_with_zeta2(
         debug_tx,
         trigger,
         project,
+        force,
         ..
     }: EditPredictionModelInput,
     preferred_model: Option<EditPredictionModelKind>,
@@ -86,6 +88,7 @@ pub fn request_prediction_with_zeta2(
                 zeta_version,
                 preferred_model,
                 is_open_source,
+                force,
             );
 
             if prompt_input_contains_special_tokens(&prompt_input, zeta_version) {
@@ -270,6 +273,7 @@ pub fn zeta2_prompt_input(
     zeta_format: ZetaFormat,
     preferred_model: Option<EditPredictionModelKind>,
     is_open_source: bool,
+    force: bool,
 ) -> (std::ops::Range<usize>, zeta_prompt::ZetaPromptInput) {
     let cursor_point = cursor_offset.to_point(snapshot);
 
@@ -314,6 +318,7 @@ pub fn zeta2_prompt_input(
         excerpt_ranges: Some(excerpt_ranges),
         preferred_model,
         in_open_source_repo: is_open_source,
+        force,
     };
     (editable_offset_range, prompt_input)
 }

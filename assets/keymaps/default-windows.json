@@ -166,6 +166,13 @@
     },
   },
   {
+    "context": "Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "alt-shift-\\": "editor::ForceEditPrediction",
+    },
+  },
+  {
     "context": "Editor && mode == auto_height",
     "use_key_equivalents": true,
     "bindings": {

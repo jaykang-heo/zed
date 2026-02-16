@@ -95,6 +95,7 @@ pub async fn run_format_prompt(
                 related_files: prompt_inputs.related_files.clone().unwrap_or_default(),
                 excerpt_ranges: None,
                 preferred_model: None,
+                force: false, // TODO
                 in_open_source_repo: example
                     .spec
                     .captured_prompt_input

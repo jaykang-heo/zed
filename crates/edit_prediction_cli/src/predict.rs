@@ -216,6 +216,7 @@ pub async fn run_prediction(
             });
 
         step_progress.set_substatus("requesting prediction");
+        let force = false; // TODO: pass from example
         let prediction = ep_store
             .update(&mut cx, |store, cx| {
                 store.request_prediction(
@@ -223,6 +224,7 @@ pub async fn run_prediction(
                     &state.buffer,
                     state.cursor_position,
                     cloud_llm_client::PredictEditsRequestTrigger::Cli,
+                    force,
                     cx,
                 )
             })

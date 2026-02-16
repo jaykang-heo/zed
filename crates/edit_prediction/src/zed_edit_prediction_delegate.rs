@@ -138,6 +138,7 @@ impl EditPredictionDelegate for ZedEditPredictionDelegate {
         buffer: Entity<language::Buffer>,
         cursor_position: language::Anchor,
         _debounce: bool,
+        force: bool,
         cx: &mut Context<Self>,
     ) {
         let store = self.store.read(cx);
@@ -151,6 +152,7 @@ impl EditPredictionDelegate for ZedEditPredictionDelegate {
         self.store.update(cx, |store, cx| {
             if let Some(current) =
                 store.prediction_at(&buffer, Some(cursor_position), &self.project, cx)
+                && !force
                 && let BufferEditPrediction::Local { prediction } = current
                 && prediction.interpolate(buffer.read(cx)).is_some()
             {
@@ -158,7 +160,13 @@ impl EditPredictionDelegate for ZedEditPredictionDelegate {
             }
 
             store.refresh_context(&self.project, &buffer, cursor_position, cx);
-            store.refresh_prediction_from_buffer(self.project.clone(), buffer, cursor_position, cx)
+            store.refresh_prediction_from_buffer(
+                self.project.clone(),
+                buffer,
+                cursor_position,
+                force,
+                cx,
+            );
         });
     }
 

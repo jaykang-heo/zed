@@ -534,6 +534,8 @@ actions!(
         FoldRecursive,
         /// Folds the selected ranges.
         FoldSelectedRanges,
+        /// Triggers a forced edit prediction
+        ForceEditPrediction,
         /// Toggles focus back to the last active buffer.
         ToggleFocus,
         /// Toggles folding at the current position.
