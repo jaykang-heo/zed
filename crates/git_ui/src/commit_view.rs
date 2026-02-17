@@ -27,7 +27,7 @@ use std::{
     sync::Arc,
 };
 use theme::ActiveTheme;
-use ui::{Avatar, CopyButton, Tooltip, prelude::*};
+use ui::{Avatar, ButtonLike, CopyButton, Tooltip, prelude::*};
 use util::{ResultExt, paths::PathStyle, rel_path::RelPath, truncate_and_trailoff};
 use workspace::item::TabTooltipContent;
 use workspace::{
@@ -991,9 +991,7 @@ impl Render for CommitViewToolbar {
             if let Some(remote) = remote.as_ref().filter(|r| r.host_supports_avatars()) {
                 let asset = CommitAvatarAsset::new(remote.clone(), sha.clone(), Some(author_email));
                 if let Some(Some(url)) = window.use_asset::<CommitAvatarAsset>(&asset, cx) {
-                    Avatar::new(url.to_string())
-                        .size(rems(1.25))
-                        .into_any_element()
+                    Avatar::new(url.to_string()).into_any_element()
                 } else {
                     Icon::new(IconName::Person)
                         .color(Color::Muted)
@@ -1019,20 +1017,20 @@ impl Render for CommitViewToolbar {
                     .gap_2()
                     .items_center()
                     .min_w_0()
-                    .child(
-                        div()
-                            .size_5()
-                            .flex_shrink_0()
-                            .rounded_full()
-                            .overflow_hidden()
-                            .child(avatar_element),
-                    )
+                    .child(avatar_element)
                     .child(Label::new(author_name).color(Color::Default))
                     .child(
-                        Label::new(summary)
-                            .color(Color::Muted)
-                            .single_line()
-                            .truncate(),
+                        ButtonLike::new("commit-summary")
+                            .child(
+                                Label::new(summary)
+                                    .color(Color::Muted)
+                                    .single_line()
+                                    .truncate(),
+                            )
+                            .on_click(|_, window, cx| {
+                                window
+                                    .dispatch_action(ToggleCommitDetailsSidebar.boxed_clone(), cx);
+                            }),
                     ),
             )
             .child(

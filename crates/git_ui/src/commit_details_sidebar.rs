@@ -7,7 +7,7 @@ use git::{
 };
 use gpui::{
     AnyElement, App, ClickEvent, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
-    SharedString, Styled, Window,
+    ScrollHandle, SharedString, Styled, Window,
 };
 use project::git_store::Repository;
 use std::sync::Arc;
@@ -66,6 +66,7 @@ pub struct CommitDetailsSidebar {
     changed_files: Vec<(RepoPath, FileStatus)>,
     on_close: Option<Box<dyn Fn(&mut Window, &mut App) + 'static>>,
     on_file_click: Option<Arc<dyn Fn(&RepoPath, &ClickEvent, &mut Window, &mut App) + 'static>>,
+    commit_details_scroll_handle: ScrollHandle,
 }
 
 impl CommitDetailsSidebar {
@@ -76,6 +77,7 @@ impl CommitDetailsSidebar {
             changed_files: Vec::new(),
             on_close: None,
             on_file_click: None,
+            commit_details_scroll_handle: ScrollHandle::new(),
         }
     }
 
@@ -157,16 +159,21 @@ impl CommitDetailsSidebar {
         let on_file_click = self.on_file_click;
         let changed_files = self.changed_files;
 
-        v_flex()
+        v_flex() // Sidebar
             .w(px(300.))
             .h_full()
             .border_l_1()
             .border_color(cx.theme().colors().border)
             .bg(cx.theme().colors().surface_background)
+            // Commit Details
             .child(
                 v_flex()
+                    .id("commit-details")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.commit_details_scroll_handle)
                     .p_3()
-                    .gap_3()
                     .child(
                         h_flex()
                             .w_full()
@@ -291,89 +298,78 @@ impl CommitDetailsSidebar {
                                         ),
                                 )
                             }),
-                    ),
-            )
-            .child(
-                div()
-                    .border_t_1()
-                    .border_color(cx.theme().colors().border)
-                    .p_3()
-                    .min_w_0()
+                    )
                     .child(
-                        v_flex()
-                            .gap_2()
-                            .child(Label::new(subject).weight(FontWeight::MEDIUM))
-                            .when(!body.is_empty(), |this| {
-                                this.child(
-                                    Label::new(body).size(LabelSize::Small).color(Color::Muted),
-                                )
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .border_t_1()
-                    .border_color(cx.theme().colors().border)
-                    .p_3()
-                    .child(
-                        v_flex()
-                            .gap_2()
+                        div()
+                            .border_t_1()
+                            .border_color(cx.theme().colors().border)
+                            .p_3()
+                            .min_w_0()
                             .child(
-                                Label::new(format!("{} Changed Files", changed_files_count))
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .when(!changed_files.is_empty(), |this| {
-                                this.child(v_flex().gap_1().children(changed_files.iter().map(
-                                    |(path, status)| {
-                                        let file_name: String = path
-                                            .file_name()
-                                            .map(|n| n.to_string())
-                                            .unwrap_or_default();
-                                        let dir_path: String = path
-                                            .parent()
-                                            .map(|p| p.as_unix_str().to_string())
-                                            .unwrap_or_default();
-
-                                        let on_file_click = on_file_click.clone();
-                                        let path_for_click = path.clone();
-
-                                        h_flex()
-                                            .id(SharedString::from(path.as_unix_str().to_string()))
-                                            .gap_1()
-                                            .overflow_hidden()
-                                            .child(git_status_icon(*status))
-                                            .child(
-                                                Label::new(file_name)
-                                                    .size(LabelSize::Small)
-                                                    .single_line(),
-                                            )
-                                            .when(!dir_path.is_empty(), |this| {
-                                                this.child(
-                                                    Label::new(dir_path)
-                                                        .size(LabelSize::Small)
-                                                        .color(Color::Muted)
-                                                        .single_line(),
-                                                )
-                                            })
-                                            .when_some(on_file_click, |this, callback| {
-                                                this.cursor_pointer().on_click(
-                                                    move |event, window, cx| {
-                                                        callback(
-                                                            &path_for_click,
-                                                            event,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    },
-                                                )
-                                            })
-                                    },
-                                )))
-                            }),
+                                v_flex()
+                                    .gap_2()
+                                    .child(Label::new(subject).weight(FontWeight::MEDIUM))
+                                    .when(!body.is_empty(), |this| {
+                                        this.child(
+                                            Label::new(body)
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted),
+                                        )
+                                    }),
+                            ),
                     ),
+            )
+            // Changes list
+            .child(
+                v_flex()
+                    .id("changed-files")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_3()
+                    .gap_2()
+                    .child(
+                        Label::new(format!("{} Changed Files", changed_files_count))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .when(!changed_files.is_empty(), |this| {
+                        this.child(v_flex().gap_1().children(changed_files.iter().map(
+                            |(path, status)| {
+                                let file_name: String =
+                                    path.file_name().map(|n| n.to_string()).unwrap_or_default();
+                                let dir_path: String = path
+                                    .parent()
+                                    .map(|p| p.as_unix_str().to_string())
+                                    .unwrap_or_default();
+
+                                let on_file_click = on_file_click.clone();
+                                let path_for_click = path.clone();
+
+                                h_flex()
+                                    .id(SharedString::from(path.as_unix_str().to_string()))
+                                    .gap_1()
+                                    .overflow_hidden()
+                                    .child(git_status_icon(*status))
+                                    .child(
+                                        Label::new(file_name).size(LabelSize::Small).single_line(),
+                                    )
+                                    .when(!dir_path.is_empty(), |this| {
+                                        this.child(
+                                            Label::new(dir_path)
+                                                .size(LabelSize::Small)
+                                                .color(Color::Muted)
+                                                .single_line(),
+                                        )
+                                    })
+                                    .when_some(on_file_click, |this, callback| {
+                                        this.cursor_pointer().on_click(move |event, window, cx| {
+                                            callback(&path_for_click, event, window, cx);
+                                        })
+                                    })
+                            },
+                        )))
+                    }),
             )
             .into_any_element()
     }
