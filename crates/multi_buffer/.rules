@@ -1,0 +1,33 @@
+# multi_buffer crate rules
+
+These rules capture recurring, non-obvious traps from recent `crates/multi_buffer` fixes.
+
+## Keep path excerpt ordering stable
+- In `update_path_excerpts`/path merge flows, preserve ascending locator order at all times.
+- Flush queued inserts before advancing existing cursors, and move `insert_after` forward explicitly.
+- Merge overlapping new+existing ranges before writing, and record replacements for absorbed excerpts.
+- Add regression coverage for out-of-order diagnostic/path excerpt updates.
+
+## Treat anchors as fallible after excerpt churn
+- Resolve anchor excerpt IDs through `latest_excerpt_id` before comparison or lookup.
+- Handle `ExcerptId::max()`/`ExcerptId::min()` as sentinel cases in summary and navigation code.
+- Keep `anchor_in_excerpt`-style APIs fallible (`Option`/`Result`) when excerpts can disappear.
+- Validate text-anchor boundaries before conversion; do not assume anchors stay in the same excerpt.
+
+## Diff hunk logic must be excerpt-boundary aware
+- Recompute hunk/gutter state when excerpts merge, split, reset, or revert.
+- Guard hunk navigation/toggling at excerpt starts, ends, and trailing deletion hunks.
+- Do not mark buffers edited from snapshot churn alone; compare semantic diff state.
+- Add regression tests for adjacent hunks and excerpt-boundary hunk rendering.
+
+## Preserve stable identity when replacing excerpts
+- When replacing/merging excerpts, always update `replaced_excerpts` and consume it via `latest_excerpt_id`.
+- Do not reuse stale excerpt IDs in selections, cursor restoration, or view replication paths.
+- Pre-allocate excerpt IDs before edit loops that can enqueue multiple insertions.
+- After excerpt resets/remaps, refresh anchors/selections against neighboring excerpts to keep position stable.
+
+## Keep path-based excerpt metadata in sync
+- Update `excerpts_by_path`, `paths_by_excerpt`, and excerpt storage together in one operation.
+- On rename/untracked/dirty/historic-blob paths, avoid dropping still-valid excerpts.
+- Clear stale path metadata when removing excerpts, including end-of-iteration edge cases.
+- Add path-key regression tests for sorted-by-path diff views and missing-tail excerpt cases.
