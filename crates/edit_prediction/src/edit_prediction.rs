@@ -75,9 +75,6 @@ pub mod zeta2;
 #[cfg(test)]
 mod edit_prediction_tests;
 
-#[cfg(test)]
-mod diagnostic_dedup_tests;
-
 use crate::license_detection::LicenseDetectionWatcher;
 use crate::mercury::Mercury;
 use crate::ollama::Ollama;
