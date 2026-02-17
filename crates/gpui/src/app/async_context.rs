@@ -146,6 +146,14 @@ impl AsyncApp {
         lock.update(f)
     }
 
+    /// Like [`AsyncApp::update`], but returns an error if the app is already borrowed.
+    /// This is useful for callbacks that may be invoked while the app is being updated elsewhere.
+    pub fn try_update<R>(&self, f: impl FnOnce(&mut App) -> R) -> Result<R> {
+        let app = self.app.upgrade().context("app was released")?;
+        let mut lock = app.try_borrow_mut()?;
+        Ok(lock.update(f))
+    }
+
     /// Arrange for the given callback to be invoked whenever the given entity emits an event of a given type.
     /// The callback is provided a handle to the emitting entity and a reference to the emitted event.
     pub fn subscribe<T, Event>(
@@ -467,5 +475,38 @@ impl VisualContext for AsyncWindowContext {
         self.app.update_window(self.window, |_, window, cx| {
             view.read(cx).focus_handle(cx).focus(window, cx);
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::TestAppContext;
+
+    #[test]
+    fn test_try_update_fails_when_already_borrowed() {
+        let cx = TestAppContext::single();
+
+        cx.update(|_app| {
+            // While the app is borrowed by this update, try_update should fail
+            let async_cx = cx.to_async();
+            let result = async_cx.try_update(|_| 42);
+            assert!(
+                result.is_err(),
+                "try_update should fail when app is already borrowed"
+            );
+        });
+    }
+
+    #[test]
+    fn test_try_update_succeeds_when_not_borrowed() {
+        let cx = TestAppContext::single();
+        let async_cx = cx.to_async();
+
+        let result = async_cx.try_update(|_| 42);
+        assert!(
+            result.is_ok(),
+            "try_update should succeed when app is not borrowed"
+        );
+        assert_eq!(result.unwrap(), 42);
     }
 }

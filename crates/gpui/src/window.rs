@@ -1185,7 +1185,12 @@ impl Window {
             let next_frame_callbacks = next_frame_callbacks.clone();
             let input_rate_tracker = input_rate_tracker.clone();
             move |request_frame_options| {
-                let thermal_state = cx.update(|cx| cx.thermal_state());
+                // Use try_update because on macOS, addTabbedWindow:ordered: can trigger
+                // a synchronous display_layer callback while the app is still borrowed
+                // during window creation.
+                let Ok(thermal_state) = cx.try_update(|cx| cx.thermal_state()) else {
+                    return;
+                };
 
                 if thermal_state == ThermalState::Serious || thermal_state == ThermalState::Critical
                 {
