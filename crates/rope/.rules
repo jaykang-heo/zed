@@ -1,0 +1,31 @@
+# rope crate traps
+
+## UTF-8/UTF-16 coordinate conversions
+- When converting `Point` / `PointUtf16` to byte offsets, return absolute chunk offsets, not row-relative lengths.
+- For out-of-range rows/columns, clip via existing range helpers and preserve left/right bias behavior.
+- Any fallback path must land on a valid UTF-8 char boundary before indexing or slicing.
+- Add regression tests that cover non-first-row clipping and multi-byte characters.
+
+## Boundary violation handling policy
+- In user-facing rope operations (`slice`, cursor movement, clipping), prefer non-panicking handling (`log::error` + clamp/clip) over process-ending panics.
+- If you introduce a non-panicking path, make helper logging code non-panicking for all out-of-range cases (`offset >= len` included).
+- Keep panic paths for explicit invariant checks only, and include boundary context in panic messages.
+- If an operation transitions from panic to log-and-clip, verify both behavior and diagnostics in tests.
+
+## Chunk slicing and bitmap mask math
+- Validate char boundaries at chunk/range edges before building `Chunks` iterators or slicing chunk text.
+- For bitmap masks, use unbounded shifts (`unbounded_shl`) with wrapping arithmetic instead of raw `1 << n` so `n == 128` is safe.
+- Keep `chars`, `chars_utf16`, `newlines`, and `tabs` bitmaps aligned with the exact slice window; misalignment silently corrupts seek/peek behavior.
+- Add edge-case coverage for empty slices, full-width slices, and `range.end == MAX_BASE`.
+
+## Tab bitmap invariants
+- Whenever chunk mutation logic changes (`new`, `append`, `split_at`, `slice`), update tab bitmap maintenance in lockstep with other chunk metadata.
+- Treat tab traversal as metadata iteration over bitmaps, not per-character scanning, in hot paths.
+- Re-check tab byte/char offsets after chunk transformations and iterator changes.
+- When propagating tab bitmaps to higher layers, preserve slice-window alignment before shifting.
+
+## Construction/append hot-path constraints
+- `Rope::push_large` and `Rope::append` are performance-sensitive; avoid unnecessary clones and preserve expected asymptotic behavior.
+- Keep construction paths allocation-aware (capacity planning and minimal rescans across chunk boundaries).
+- If changing construction/search internals, verify with rope benchmarks before landing.
+- Adjust parallelization or threshold constants only with benchmark evidence across representative text sizes.
