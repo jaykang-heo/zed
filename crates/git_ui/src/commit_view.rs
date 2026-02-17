@@ -7,9 +7,9 @@ use git::repository::{CommitDetails, CommitDiff, RepoPath, is_binary_content};
 use git::status::{FileStatus, StatusCode, TrackedStatus};
 use git::{GitHostingProviderRegistry, GitRemote, parse_git_remote_url};
 use gpui::{
-    AnyElement, App, AppContext as _, AsyncApp, AsyncWindowContext, Context, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement, PromptLevel, Render,
-    Styled, Task, WeakEntity, Window, actions,
+    Action, AnyElement, App, AppContext as _, AsyncApp, AsyncWindowContext, Context, Entity,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement,
+    PromptLevel, Render, SharedString, Styled, Task, WeakEntity, Window, actions,
 };
 use language::{
     Anchor, Buffer, Capability, DiskState, File, LanguageRegistry, LineEnding, OffsetRangeExt as _,
@@ -36,10 +36,21 @@ use workspace::{
     searchable::SearchableItemHandle,
 };
 
+use crate::commit_details_sidebar::{
+    CommitDetailsSidebar, CommitDetailsSidebarData, get_remote_from_repository,
+};
 use crate::commit_tooltip::CommitAvatarAsset;
 use crate::git_panel::GitPanel;
 
-actions!(git, [ApplyCurrentStash, PopCurrentStash, DropCurrentStash,]);
+actions!(
+    git,
+    [
+        ApplyCurrentStash,
+        PopCurrentStash,
+        DropCurrentStash,
+        ToggleCommitDetailsSidebar,
+    ]
+);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
@@ -52,6 +63,9 @@ pub fn init(cx: &mut App) {
         workspace.register_action(|workspace, _: &PopCurrentStash, window, cx| {
             CommitView::pop_stash(workspace, window, cx);
         });
+        workspace.register_action(|workspace, _: &ToggleCommitDetailsSidebar, window, cx| {
+            CommitView::toggle_details_sidebar(workspace, window, cx);
+        });
     })
     .detach();
 }
@@ -63,6 +77,8 @@ pub struct CommitView {
     multibuffer: Entity<MultiBuffer>,
     repository: Entity<Repository>,
     remote: Option<GitRemote>,
+    changed_files: Vec<(RepoPath, FileStatus)>,
+    show_details_sidebar: bool,
 }
 
 struct GitBlob {
@@ -169,6 +185,29 @@ impl CommitView {
     ) -> Self {
         let language_registry = project.read(cx).languages().clone();
         let multibuffer = cx.new(|_| MultiBuffer::new(Capability::ReadOnly));
+
+        let changed_files: Vec<(RepoPath, FileStatus)> = commit_diff
+            .files
+            .iter()
+            .map(|file| {
+                let is_created = file.old_text.is_none();
+                let is_deleted = file.new_text.is_none();
+                let status_code = if is_created {
+                    StatusCode::Added
+                } else if is_deleted {
+                    StatusCode::Deleted
+                } else {
+                    StatusCode::Modified
+                };
+                (
+                    file.path.clone(),
+                    FileStatus::Tracked(TrackedStatus {
+                        index_status: status_code,
+                        worktree_status: StatusCode::Unmodified,
+                    }),
+                )
+            })
+            .collect();
 
         let message_buffer = cx.new(|cx| {
             let mut buffer = Buffer::local(commit.message.clone(), cx);
@@ -390,6 +429,20 @@ impl CommitView {
             stash,
             repository,
             remote,
+            changed_files,
+            show_details_sidebar: false,
+        }
+    }
+
+    pub fn toggle_details_sidebar(workspace: &mut Workspace, _window: &mut Window, cx: &mut App) {
+        if let Some(commit_view) = workspace
+            .active_item(cx)
+            .and_then(|item| item.act_as::<CommitView>(cx))
+        {
+            commit_view.update(cx, |this, cx| {
+                this.show_details_sidebar = !this.show_details_sidebar;
+                cx.notify();
+            });
         }
     }
 
@@ -828,22 +881,61 @@ impl Item for CommitView {
                 stash: self.stash,
                 repository: self.repository.clone(),
                 remote: self.remote.clone(),
+                changed_files: self.changed_files.clone(),
+                show_details_sidebar: self.show_details_sidebar,
             }
         })))
     }
 }
 
 impl Render for CommitView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_stash = self.stash.is_some();
 
-        v_flex()
+        let sidebar = self.show_details_sidebar.then(|| {
+            let mut lines = self.commit.message.lines();
+            let subject: SharedString = lines.next().unwrap_or("").to_string().into();
+            let body: SharedString = lines
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string()
+                .into();
+
+            let remote = self
+                .repository
+                .update(cx, |repo, cx| get_remote_from_repository(repo, cx));
+
+            let data = CommitDetailsSidebarData::new(
+                self.commit.sha.clone(),
+                self.commit.author_name.clone(),
+                self.commit.author_email.clone(),
+                self.commit.commit_timestamp,
+                subject,
+                body,
+            );
+
+            CommitDetailsSidebar::new(data)
+                .remote(remote)
+                .changed_files(self.changed_files.clone())
+                .render(window, cx)
+        });
+
+        h_flex()
             .key_context(if is_stash { "StashDiff" } else { "CommitDiff" })
             .size_full()
             .bg(cx.theme().colors().editor_background)
             .when(!self.editor.read(cx).is_empty(cx), |this| {
-                this.child(div().flex_grow().child(self.editor.clone()))
+                this.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .overflow_hidden()
+                        .child(self.editor.clone()),
+                )
             })
+            .children(sidebar)
     }
 }
 
@@ -865,7 +957,7 @@ impl Render for CommitViewToolbar {
             return div().into_any_element();
         };
 
-        let (sha, author_name, author_email, remote, summary) = {
+        let (sha, author_name, author_email, remote, summary, show_details_sidebar) = {
             let commit_view_ref = commit_view.read(cx);
             (
                 commit_view_ref.commit.sha.clone(),
@@ -879,6 +971,7 @@ impl Render for CommitViewToolbar {
                     .next()
                     .unwrap_or("")
                     .to_string(),
+                commit_view_ref.show_details_sidebar,
             )
         };
 
@@ -937,14 +1030,20 @@ impl Render for CommitViewToolbar {
                 h_flex()
                     .gap_1()
                     .flex_shrink_0()
-                    .child(
-                        Label::new(short_sha.clone())
-                            .color(Color::Muted)
-                            .buffer_font(cx),
-                    )
+                    .child(Label::new(short_sha).color(Color::Muted).buffer_font(cx))
                     .child(
                         CopyButton::new("copy-commit-sha", sha.to_string())
                             .tooltip_label("Copy SHA"),
+                    )
+                    .child(
+                        IconButton::new("toggle-details-sidebar", IconName::Info)
+                            .icon_size(IconSize::Small)
+                            .toggle_state(show_details_sidebar)
+                            .tooltip(Tooltip::text("Toggle Commit Details"))
+                            .on_click(|_, window, cx| {
+                                window
+                                    .dispatch_action(ToggleCommitDetailsSidebar.boxed_clone(), cx);
+                            }),
                     ),
             )
             .into_any_element()
