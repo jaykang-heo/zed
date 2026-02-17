@@ -203,18 +203,27 @@ impl Worktree {
 
 pub fn parse_worktrees_from_str<T: AsRef<str>>(raw_worktrees: T) -> Vec<Worktree> {
     let mut worktrees = Vec::new();
-    let entries = raw_worktrees.as_ref().split("\n\n");
+    let normalized = raw_worktrees.as_ref().replace("\r\n", "\n");
+    let entries = normalized.split("\n\n");
     for entry in entries {
-        let mut parts = entry.splitn(3, '\n');
-        let path = parts
-            .next()
-            .and_then(|p| p.split_once(' ').map(|(_, path)| path.to_string()));
-        let sha = parts
-            .next()
-            .and_then(|p| p.split_once(' ').map(|(_, sha)| sha.to_string()));
-        let ref_name = parts
-            .next()
-            .and_then(|p| p.split_once(' ').map(|(_, ref_name)| ref_name.to_string()));
+        let mut path = None;
+        let mut sha = None;
+        let mut ref_name = None;
+
+        for line in entry.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("worktree ") {
+                path = Some(rest.to_string());
+            } else if let Some(rest) = line.strip_prefix("HEAD ") {
+                sha = Some(rest.to_string());
+            } else if let Some(rest) = line.strip_prefix("branch ") {
+                ref_name = Some(rest.to_string());
+            }
+            // Ignore other lines: detached, bare, locked, prunable, etc.
+        }
 
         if let (Some(path), Some(sha), Some(ref_name)) = (path, sha, ref_name) {
             worktrees.push(Worktree {
@@ -1577,14 +1586,15 @@ impl GitRepository for RealGitRepository {
             OsString::from("--no-optional-locks"),
             OsString::from("worktree"),
             OsString::from("add"),
+            OsString::from("-b"),
+            OsString::from(name.as_str()),
+            OsString::from("--"),
             OsString::from(final_path.as_os_str()),
         ];
         if let Some(from_commit) = from_commit {
-            args.extend([
-                OsString::from("-b"),
-                OsString::from(name.as_str()),
-                OsString::from(from_commit),
-            ]);
+            args.push(OsString::from(from_commit));
+        } else {
+            args.push(OsString::from("HEAD"));
         }
         self.executor
             .spawn(async move {
@@ -1597,7 +1607,7 @@ impl GitRepository for RealGitRepository {
                     Ok(())
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    anyhow::bail!("git worktree list failed: {stderr}");
+                    anyhow::bail!("git worktree add failed: {stderr}");
                 }
             })
             .boxed()
@@ -1614,11 +1624,12 @@ impl GitRepository for RealGitRepository {
                     "--no-optional-locks".into(),
                     "worktree".into(),
                     "remove".into(),
-                    path.as_os_str().into(),
                 ];
                 if force {
                     args.push("--force".into());
                 }
+                args.push("--".into());
+                args.push(path.as_os_str().into());
                 GitBinary::new(git_binary_path, working_directory?, executor)
                     .run(args)
                     .await?;
@@ -1638,6 +1649,7 @@ impl GitRepository for RealGitRepository {
                     "--no-optional-locks".into(),
                     "worktree".into(),
                     "move".into(),
+                    "--".into(),
                     old_path.as_os_str().into(),
                     new_path.as_os_str().into(),
                 ];
