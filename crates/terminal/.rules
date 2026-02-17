@@ -1,0 +1,31 @@
+# Terminal crate rules
+
+## Hyperlink and path detection changes must ship with edge-case tests
+- Treat hyperlink parsing/sanitization as compatibility-sensitive behavior.
+- When changing regexes or token boundaries, add tests for punctuation, brackets/quotes, URL escapes, and box-drawing/Unicode prefixes.
+- Include Windows-specific cases (`file://` drive URIs, `path:line`, and `foo.cs(20,5)` forms).
+
+## Never hand-roll shell argument quoting or shell detection
+- Route command argument escaping through `ShellKind::try_quote` and shell-kind helpers.
+- Validate quoting behavior for CMD/PowerShell and Unix shells before merging.
+- If a change touches shell selection, cover executable-path-based detection and WSL/remote shell variants.
+
+## Treat terminal environment and activation scripts as platform-specific hazards
+- Environment propagation is not uniform across shells/OSes; avoid assumptions that work on only one platform.
+- Guard against problematic vars and unresolved substitutions (for example, shell level and imported VS Code vars).
+- Verify activation-script behavior on Windows/Pwsh/CMD and Python env flows (`pyenv`/toolchain venv).
+
+## Preserve process lifecycle guarantees on stop/exit paths
+- Terminal stop/exit logic must target the child process (or process group on Unix), not only the terminal wrapper process.
+- Preserve output-drain behavior so users still receive final stdout/stderr when commands are killed or exit quickly.
+- Avoid immediate hard-kill paths when graceful child exit is expected; account for signal-driven exits.
+
+## Keep selection/scroll/hover state stable under continuous output
+- Mouse mode, continuous output, and selection updates interact; test them together when modifying input or scroll handling.
+- Verify shift-click/right-click/copy-on-select behavior and ensure selection anchors do not jump on first-line/fast scroll transitions.
+- Clear transient hover/link state when targets disappear to avoid stale click targets.
+
+## Terminal tests must account for shell and timing variability
+- Shell behavior differs (fish, pwsh, cmd, etc.); add or update shell coverage when touching spawn/EOF/exit behavior.
+- Prefer robust synchronization over brittle timing assumptions in terminal tests.
+- For flaky terminal tests, fix the underlying race/ordering issue instead of only disabling the test.
