@@ -8,18 +8,18 @@
         ; function calls
         (call
             [
-                (attribute attribute: (identifier) @function_name)
-                (identifier) @function_name
+                (attribute attribute: (identifier))
+                (identifier) 
             ]
             arguments: (argument_list
-                (comment) @comment
+                (comment) @_comment
                 (string
                     (string_content) @injection.content
                 )
         ))
 
         ; string variables
-        ((comment) @comment
+        ((comment) @_comment
             .
             (expression_statement
                 (assignment
@@ -29,6 +29,6 @@
                 )
         ))
     ]
-    (#match? @comment "^(#|#\\s+)(?i:sql)\\s*$")
+    (#match? @_comment "^(#|#\\s+)(?i:sql)\\s*$")
     (#set! injection.language "sql")
 )
