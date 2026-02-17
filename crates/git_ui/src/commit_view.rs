@@ -5,14 +5,11 @@ use editor::display_map::{BlockPlacement, BlockProperties, BlockStyle};
 use editor::{Addon, Editor, EditorEvent, ExcerptRange, MultiBuffer, multibuffer_context_lines};
 use git::repository::{CommitDetails, CommitDiff, RepoPath, is_binary_content};
 use git::status::{FileStatus, StatusCode, TrackedStatus};
-use git::{
-    BuildCommitPermalinkParams, GitHostingProviderRegistry, GitRemote, ParsedGitRemote,
-    parse_git_remote_url,
-};
+use git::{GitHostingProviderRegistry, GitRemote, parse_git_remote_url};
 use gpui::{
-    AnyElement, App, AppContext as _, AsyncApp, AsyncWindowContext, ClipboardItem, Context,
-    Element, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
-    ParentElement, PromptLevel, Render, Styled, Task, WeakEntity, Window, actions,
+    AnyElement, App, AppContext as _, AsyncApp, AsyncWindowContext, Context, Entity, EventEmitter,
+    FocusHandle, Focusable, InteractiveElement, IntoElement, ParentElement, PromptLevel, Render,
+    Styled, Task, WeakEntity, Window, actions,
 };
 use language::{
     Anchor, Buffer, Capability, DiskState, File, LanguageRegistry, LineEnding, OffsetRangeExt as _,
@@ -27,7 +24,7 @@ use std::{
     sync::Arc,
 };
 use theme::ActiveTheme;
-use ui::{ButtonLike, DiffStat, Tooltip, prelude::*};
+use ui::{Avatar, CopyButton, Tooltip, prelude::*};
 use util::{ResultExt, paths::PathStyle, rel_path::RelPath, truncate_and_trailoff};
 use workspace::item::TabTooltipContent;
 use workspace::{
@@ -39,7 +36,7 @@ use workspace::{
     searchable::SearchableItemHandle,
 };
 
-use crate::commit_tooltip::CommitAvatar;
+use crate::commit_tooltip::CommitAvatarAsset;
 use crate::git_panel::GitPanel;
 
 actions!(git, [ApplyCurrentStash, PopCurrentStash, DropCurrentStash,]);
@@ -394,243 +391,6 @@ impl CommitView {
             repository,
             remote,
         }
-    }
-
-    fn render_commit_avatar(
-        &self,
-        sha: &SharedString,
-        size: impl Into<gpui::AbsoluteLength>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> AnyElement {
-        let size = size.into();
-        let avatar = CommitAvatar::new(
-            sha,
-            Some(self.commit.author_email.clone()),
-            self.remote.as_ref(),
-        );
-
-        v_flex()
-            .w(size)
-            .h(size)
-            .border_1()
-            .border_color(cx.theme().colors().border)
-            .rounded_full()
-            .justify_center()
-            .items_center()
-            .child(
-                avatar
-                    .avatar(window, cx)
-                    .map(|a| a.size(size).into_any_element())
-                    .unwrap_or_else(|| {
-                        Icon::new(IconName::Person)
-                            .color(Color::Muted)
-                            .size(IconSize::Medium)
-                            .into_any_element()
-                    }),
-            )
-            .into_any()
-    }
-
-    fn calculate_changed_lines(&self, cx: &App) -> (u32, u32) {
-        let snapshot = self.multibuffer.read(cx).snapshot(cx);
-        let mut total_additions = 0u32;
-        let mut total_deletions = 0u32;
-
-        let mut seen_buffers = std::collections::HashSet::new();
-        for (_, buffer, _) in snapshot.excerpts() {
-            let buffer_id = buffer.remote_id();
-            if !seen_buffers.insert(buffer_id) {
-                continue;
-            }
-
-            let Some(diff) = snapshot.diff_for_buffer_id(buffer_id) else {
-                continue;
-            };
-
-            let base_text = diff.base_text();
-
-            for hunk in diff.hunks_intersecting_range(Anchor::MIN..Anchor::MAX, buffer) {
-                let added_rows = hunk.range.end.row.saturating_sub(hunk.range.start.row);
-                total_additions += added_rows;
-
-                let base_start = base_text
-                    .offset_to_point(hunk.diff_base_byte_range.start)
-                    .row;
-                let base_end = base_text.offset_to_point(hunk.diff_base_byte_range.end).row;
-                let deleted_rows = base_end.saturating_sub(base_start);
-
-                total_deletions += deleted_rows;
-            }
-        }
-
-        (total_additions, total_deletions)
-    }
-
-    fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let commit = &self.commit;
-        let author_name = commit.author_name.clone();
-        let commit_sha = commit.sha.clone();
-        let commit_date = time::OffsetDateTime::from_unix_timestamp(commit.commit_timestamp)
-            .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
-        let local_offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
-        let date_string = time_format::format_localized_timestamp(
-            commit_date,
-            time::OffsetDateTime::now_utc(),
-            local_offset,
-            time_format::TimestampFormat::MediumAbsolute,
-        );
-
-        let remote_info = self
-            .remote
-            .as_ref()
-            .filter(|_| self.stash.is_none())
-            .map(|remote| {
-                let provider = remote.host.name();
-                let parsed_remote = ParsedGitRemote {
-                    owner: remote.owner.as_ref().into(),
-                    repo: remote.repo.as_ref().into(),
-                };
-                let params = BuildCommitPermalinkParams { sha: &commit.sha };
-                let url = remote
-                    .host
-                    .build_commit_permalink(&parsed_remote, params)
-                    .to_string();
-                (provider, url)
-            });
-
-        let (additions, deletions) = self.calculate_changed_lines(cx);
-
-        let commit_diff_stat = if additions > 0 || deletions > 0 {
-            Some(DiffStat::new(
-                "commit-diff-stat",
-                additions as usize,
-                deletions as usize,
-            ))
-        } else {
-            None
-        };
-
-        let gutter_width = self.editor.update(cx, |editor, cx| {
-            let snapshot = editor.snapshot(window, cx);
-            let style = editor.style(cx);
-            let font_id = window.text_system().resolve_font(&style.text.font());
-            let font_size = style.text.font_size.to_pixels(window.rem_size());
-            snapshot
-                .gutter_dimensions(font_id, font_size, style, window, cx)
-                .full_width()
-        });
-
-        let clipboard_has_link = cx
-            .read_from_clipboard()
-            .and_then(|entry| entry.text())
-            .map_or(false, |clipboard_text| {
-                clipboard_text.trim() == commit_sha.as_ref()
-            });
-
-        let (copy_icon, copy_icon_color) = if clipboard_has_link {
-            (IconName::Check, Color::Success)
-        } else {
-            (IconName::Copy, Color::Muted)
-        };
-
-        h_flex()
-            .border_b_1()
-            .border_color(cx.theme().colors().border_variant)
-            .w_full()
-            .child(
-                h_flex()
-                    .w(gutter_width)
-                    .justify_center()
-                    .child(self.render_commit_avatar(&commit.sha, rems_from_px(48.), window, cx)),
-            )
-            .child(
-                h_flex()
-                    .py_4()
-                    .pl_1()
-                    .pr_4()
-                    .w_full()
-                    .items_start()
-                    .justify_between()
-                    .flex_wrap()
-                    .child(
-                        v_flex()
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .child(Label::new(author_name).color(Color::Default))
-                                    .child({
-                                        ButtonLike::new("sha")
-                                            .child(
-                                                h_flex()
-                                                    .group("sha_btn")
-                                                    .size_full()
-                                                    .max_w_32()
-                                                    .gap_0p5()
-                                                    .child(
-                                                        Label::new(commit_sha.clone())
-                                                            .color(Color::Muted)
-                                                            .size(LabelSize::Small)
-                                                            .truncate()
-                                                            .buffer_font(cx),
-                                                    )
-                                                    .child(
-                                                        div().visible_on_hover("sha_btn").child(
-                                                            Icon::new(copy_icon)
-                                                                .color(copy_icon_color)
-                                                                .size(IconSize::Small),
-                                                        ),
-                                                    ),
-                                            )
-                                            .tooltip({
-                                                let commit_sha = commit_sha.clone();
-                                                move |_, cx| {
-                                                    Tooltip::with_meta(
-                                                        "Copy Commit SHA",
-                                                        None,
-                                                        commit_sha.clone(),
-                                                        cx,
-                                                    )
-                                                }
-                                            })
-                                            .on_click(move |_, _, cx| {
-                                                cx.stop_propagation();
-                                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                                    commit_sha.to_string(),
-                                                ));
-                                            })
-                                    }),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_1p5()
-                                    .child(
-                                        Label::new(date_string)
-                                            .color(Color::Muted)
-                                            .size(LabelSize::Small),
-                                    )
-                                    .child(
-                                        Label::new("•")
-                                            .color(Color::Ignored)
-                                            .size(LabelSize::Small),
-                                    )
-                                    .children(commit_diff_stat),
-                            ),
-                    )
-                    .children(remote_info.map(|(provider_name, url)| {
-                        let icon = match provider_name.as_str() {
-                            "GitHub" => IconName::Github,
-                            _ => IconName::Link,
-                        };
-
-                        Button::new("view_on_provider", format!("View on {}", provider_name))
-                            .icon(icon)
-                            .icon_color(Color::Muted)
-                            .icon_size(IconSize::Small)
-                            .icon_position(IconPosition::Start)
-                            .on_click(move |_, _, cx| cx.open_url(&url))
-                    })),
-            )
     }
 
     fn apply_stash(workspace: &mut Workspace, window: &mut Window, cx: &mut App) {
@@ -1074,14 +834,13 @@ impl Item for CommitView {
 }
 
 impl Render for CommitView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_stash = self.stash.is_some();
 
         v_flex()
             .key_context(if is_stash { "StashDiff" } else { "CommitDiff" })
             .size_full()
             .bg(cx.theme().colors().editor_background)
-            .child(self.render_header(window, cx))
             .when(!self.editor.read(cx).is_empty(cx), |this| {
                 this.child(div().flex_grow().child(self.editor.clone()))
             })
@@ -1101,8 +860,94 @@ impl CommitViewToolbar {
 impl EventEmitter<ToolbarItemEvent> for CommitViewToolbar {}
 
 impl Render for CommitViewToolbar {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().hidden()
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(commit_view) = self.commit_view.as_ref().and_then(|cv| cv.upgrade()) else {
+            return div().into_any_element();
+        };
+
+        let (sha, author_name, author_email, remote, summary) = {
+            let commit_view_ref = commit_view.read(cx);
+            (
+                commit_view_ref.commit.sha.clone(),
+                commit_view_ref.commit.author_name.clone(),
+                commit_view_ref.commit.author_email.clone(),
+                commit_view_ref.remote.clone(),
+                commit_view_ref
+                    .commit
+                    .message
+                    .split('\n')
+                    .next()
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        };
+
+        let short_sha: SharedString = sha.chars().take(7).collect::<String>().into();
+        let summary: SharedString = summary.into();
+
+        let avatar_element =
+            if let Some(remote) = remote.as_ref().filter(|r| r.host_supports_avatars()) {
+                let asset = CommitAvatarAsset::new(remote.clone(), sha.clone(), Some(author_email));
+                if let Some(Some(url)) = window.use_asset::<CommitAvatarAsset>(&asset, cx) {
+                    Avatar::new(url.to_string())
+                        .size(rems(1.25))
+                        .into_any_element()
+                } else {
+                    Icon::new(IconName::Person)
+                        .color(Color::Muted)
+                        .size(IconSize::Small)
+                        .into_any_element()
+                }
+            } else {
+                Icon::new(IconName::Person)
+                    .color(Color::Muted)
+                    .size(IconSize::Small)
+                    .into_any_element()
+            };
+
+        h_flex()
+            .id("commit-view-toolbar")
+            .pl_3()
+            .gap_2()
+            .items_center()
+            .flex_grow()
+            .justify_between()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .size_5()
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .overflow_hidden()
+                            .child(avatar_element),
+                    )
+                    .child(Label::new(author_name).color(Color::Default))
+                    .child(
+                        Label::new(summary)
+                            .color(Color::Muted)
+                            .single_line()
+                            .truncate(),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .flex_shrink_0()
+                    .child(
+                        Label::new(short_sha.clone())
+                            .color(Color::Muted)
+                            .buffer_font(cx),
+                    )
+                    .child(
+                        CopyButton::new("copy-commit-sha", sha.to_string())
+                            .tooltip_label("Copy SHA"),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
@@ -1113,12 +958,11 @@ impl ToolbarItemView for CommitViewToolbar {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> ToolbarItemLocation {
-        if let Some(entity) = active_pane_item.and_then(|i| i.act_as::<CommitView>(cx))
-            && entity.read(cx).stash.is_some()
-        {
+        if let Some(entity) = active_pane_item.and_then(|i| i.act_as::<CommitView>(cx)) {
             self.commit_view = Some(entity.downgrade());
-            return ToolbarItemLocation::PrimaryRight;
+            return ToolbarItemLocation::PrimaryLeft;
         }
+        self.commit_view = None;
         ToolbarItemLocation::Hidden
     }
 
