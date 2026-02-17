@@ -1,0 +1,31 @@
+# Vim crate rules
+
+## 1) Motion/text-object changes must be tested in wrapped and multi-buffer contexts
+- If you change motion, text object, or selection expansion logic, add regression tests for a wrapped-line case and one non-trivial snapshot context (diff hunks, markdown code blocks, or multibuffer excerpts).
+- Include empty-first-line and empty-line cases for linewise behavior.
+- Verify both vim and helix modes when the code path is shared.
+
+## 2) Mode transitions must leave consistent mode, cursor shape, and selection state
+- Any command that enters temporary/visual/helix/select/replace mode must define and test exit behavior for success, cancel, and end-of-line paths.
+- After command completion, assert final mode and cursor shape explicitly.
+- Repeat/replay operators must clear temporary state before returning.
+
+## 3) Search and substitute must go through setting-aware paths
+- Buffer search (`/`, `?`, `*`, `#`) and `:s`/`:g` behavior must consistently honor vim settings (for example: `ignorecase` and `gdefault`).
+- Preserve and restore cursor position when entering and dismissing search UIs.
+- Add tests that combine settings with counts/ranges.
+
+## 4) Surround and text objects must preserve whitespace/newline semantics
+- Treat surrounding whitespace and newlines as command semantics, not formatting noise.
+- Validate quote/bracket variants and count-modified objects (`2aw`, `2iw`) against expected vim behavior.
+- Add regression tests for language-specific constructs and paragraph objects when changing object boundaries.
+
+## 5) Offset math must be boundary-safe and infallible
+- Never assume UTF-8 boundary validity, non-empty selections, or in-bounds snapshot indexes.
+- Prefer anchor/point conversion helpers that return `Option`/`Result`; clamp or early-return on invalid data.
+- End-of-line operations should be infallible in normal flows.
+
+## 6) Paste/yank behavior must be mode- and register-aware
+- Test paste/yank changes across normal, visual, replace, and helix-select flows.
+- Cover linewise vs charwise paste and system clipboard non-text payloads.
+- Ensure post-paste selection/mode behavior matches vim and helix expectations.
