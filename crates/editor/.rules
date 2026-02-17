@@ -1,0 +1,33 @@
+# Editor crate rules
+
+These rules capture recurring editor-specific failure modes from recent merged PRs.
+
+## Keep split-diff behavior symmetric
+- Treat side-by-side diff as one feature with two views: update LHS and RHS behavior together.
+- When changing hunk controls, spacer blocks, scrolling, searching, or folding, verify parity on both sides.
+- Keep companion excerpt/id mappings consistent whenever excerpts are added, removed, or reordered.
+
+## Defend excerpt-boundary math
+- Test edits and cursor movement at excerpt starts/ends, especially around trailing newlines.
+- Treat end-of-excerpt inlays and soft wraps as boundary cases, not normal interior positions.
+- Re-run spacing/alignment checks when hunks begin or end exactly at excerpt boundaries.
+
+## Never assume excerpts/folds/spacers still exist
+- Diff and fold state can disappear mid-update; use lookups that tolerate missing ranges.
+- Guard spacer and fold computations against stale anchors after edits, sync, or view toggles.
+- Prefer safe fallbacks over panics when synchronization sees partially updated state.
+
+## Update sticky headers and relative numbering together
+- Any fold-map or hunk-visibility change must be validated against sticky header row selection.
+- Re-check relative line-number rendering with nested folds and hidden/deleted hunk regions.
+- Ensure sticky-row range updates handle start==end and row-pop edge cases correctly.
+
+## Invalidate highlight/token state on non-edit changes
+- Do not only invalidate on text edits: also invalidate on theme, settings, and language-server state changes.
+- When semantic highlighting or document highlights are toggled, clear stale caches immediately.
+- Include UTF-8/multibyte and inlay-adjacent cases in highlight and hover range validation.
+
+## Batch and defer expensive recomputation
+- Avoid full recomputation in hot paths (scroll, refresh, sync); batch or debounce where possible.
+- Move heavy syntax-walking/diff recomputation to background tasks when correctness allows.
+- After optimization changes, verify output equivalence to avoid stale diffs or oversized edit emissions.
