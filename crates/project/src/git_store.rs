@@ -396,6 +396,7 @@ pub enum RepositoryEvent {
     MergeHeadsChanged,
     BranchChanged,
     StashEntriesChanged,
+    WorktreesChanged,
     PendingOpsChanged { pending_ops: SumTree<PendingOps> },
     GitGraphCountUpdated((LogOrder, LogSource), usize),
 }
@@ -2292,8 +2293,8 @@ impl GitStore {
         let commit = envelope.payload.commit;
 
         repository_handle
-            .update(&mut cx, |repository_handle, _| {
-                repository_handle.create_worktree(name, directory, commit)
+            .update(&mut cx, |repository_handle, cx| {
+                repository_handle.create_worktree(name, directory, commit, cx)
             })
             .await??;
 
@@ -2311,8 +2312,8 @@ impl GitStore {
         let force = envelope.payload.force;
 
         repository_handle
-            .update(&mut cx, |repository_handle, _| {
-                repository_handle.remove_worktree(path, force)
+            .update(&mut cx, |repository_handle, cx| {
+                repository_handle.remove_worktree(path, force, cx)
             })
             .await??;
 
@@ -2330,8 +2331,8 @@ impl GitStore {
         let new_path = PathBuf::from(envelope.payload.new_path);
 
         repository_handle
-            .update(&mut cx, |repository_handle, _| {
-                repository_handle.rename_worktree(old_path, new_path)
+            .update(&mut cx, |repository_handle, cx| {
+                repository_handle.rename_worktree(old_path, new_path, cx)
             })
             .await??;
 
@@ -5574,14 +5575,23 @@ impl Repository {
         name: String,
         path: PathBuf,
         commit: Option<String>,
+        cx: &mut Context<Self>,
     ) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
+        let this = cx.weak_entity();
         self.send_job(
             Some("git worktree add".into()),
-            move |repo, _cx| async move {
+            move |repo, mut cx| async move {
                 match repo {
                     RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                        backend.create_worktree(name, path, commit).await
+                        let result = backend.create_worktree(name, path, commit).await;
+                        if result.is_ok() {
+                            this.update(&mut cx, |_this, cx| {
+                                cx.emit(RepositoryEvent::WorktreesChanged);
+                            })
+                            .ok();
+                        }
+                        result
                     }
                     RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
                         client
@@ -5601,14 +5611,27 @@ impl Repository {
         )
     }
 
-    pub fn remove_worktree(&mut self, path: PathBuf, force: bool) -> oneshot::Receiver<Result<()>> {
+    pub fn remove_worktree(
+        &mut self,
+        path: PathBuf,
+        force: bool,
+        cx: &mut Context<Self>,
+    ) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
+        let this = cx.weak_entity();
         self.send_job(
             Some("git worktree remove".into()),
-            move |repo, _cx| async move {
+            move |repo, mut cx| async move {
                 match repo {
                     RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                        backend.remove_worktree(path, force).await
+                        let result = backend.remove_worktree(path, force).await;
+                        if result.is_ok() {
+                            this.update(&mut cx, |_this, cx| {
+                                cx.emit(RepositoryEvent::WorktreesChanged);
+                            })
+                            .ok();
+                        }
+                        result
                     }
                     RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
                         client
@@ -5631,14 +5654,23 @@ impl Repository {
         &mut self,
         old_path: PathBuf,
         new_path: PathBuf,
+        cx: &mut Context<Self>,
     ) -> oneshot::Receiver<Result<()>> {
         let id = self.id;
+        let this = cx.weak_entity();
         self.send_job(
             Some("git worktree move".into()),
-            move |repo, _cx| async move {
+            move |repo, mut cx| async move {
                 match repo {
                     RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                        backend.rename_worktree(old_path, new_path).await
+                        let result = backend.rename_worktree(old_path, new_path).await;
+                        if result.is_ok() {
+                            this.update(&mut cx, |_this, cx| {
+                                cx.emit(RepositoryEvent::WorktreesChanged);
+                            })
+                            .ok();
+                        }
+                        result
                     }
                     RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
                         client

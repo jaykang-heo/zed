@@ -296,8 +296,8 @@ impl WorktreeListDelegate {
             };
             let path = paths.get(0).cloned().context("No path selected")?;
 
-            repo.update(cx, |repo, _| {
-                repo.create_worktree(branch.clone(), path.clone(), commit)
+            repo.update(cx, |repo, cx| {
+                repo.create_worktree(branch.clone(), path.clone(), commit, cx)
             })
             .await??;
             let new_worktree_path = path.join(branch);
