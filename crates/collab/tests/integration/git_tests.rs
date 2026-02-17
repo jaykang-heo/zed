@@ -185,6 +185,12 @@ async fn test_repository_remove_worktree_remote_roundtrip(
     );
 
     // Pre-populate a worktree on the host so we can remove it via remote.
+    // Create the directory first since remove_worktree does filesystem operations.
+    client_a
+        .fs()
+        .create_dir(Path::new("/worktrees/test-branch"))
+        .await
+        .unwrap();
     client_a
         .fs()
         .with_git_state(Path::new(path!("/project/.git")), false, |state| {
@@ -252,6 +258,12 @@ async fn test_repository_rename_worktree_remote_roundtrip(
     let repo_b = cx_b.update(|cx| project_b.read(cx).active_repository(cx).unwrap());
 
     // Pre-populate a worktree on the host so we can rename it via remote.
+    // Create the directory first since rename_worktree does filesystem operations.
+    client_a
+        .fs()
+        .create_dir(Path::new("/worktrees/old-branch"))
+        .await
+        .unwrap();
     client_a
         .fs()
         .with_git_state(Path::new(path!("/project/.git")), false, |state| {
