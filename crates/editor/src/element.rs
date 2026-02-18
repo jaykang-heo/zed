@@ -4009,9 +4009,14 @@ impl EditorElement {
                 result.into_any()
             }
 
-            Block::Spacer { height, .. } => {
-                Self::render_spacer_block(block_id, *height, line_height, horizontal_scroll_position, window, cx)
-            }
+            Block::Spacer { height, .. } => Self::render_spacer_block(
+                block_id,
+                *height,
+                line_height,
+                horizontal_scroll_position,
+                window,
+                cx,
+            ),
         };
 
         // Discover the element's content height, then round up to the nearest multiple of line height.
