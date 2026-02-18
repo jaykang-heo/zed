@@ -503,7 +503,7 @@ async fn test_repository_worktree_ops_local(
 
     // Track WorktreesChanged events.
     let events = Arc::new(Mutex::new(Vec::new()));
-    let subscription = cx_a.update(|cx| {
+    let _subscription = cx_a.update(|cx| {
         let events = events.clone();
         cx.subscribe(&repo, move |_, event: &RepositoryEvent, _| {
             events.lock().push(event.clone());
@@ -621,7 +621,7 @@ async fn test_repository_worktree_ops_local(
         "WorktreesChanged event should have been emitted for rename"
     );
 
-    drop(subscription);
+    drop(_subscription);
 }
 
 #[gpui::test]
