@@ -13,8 +13,8 @@ use project::git_store::Repository;
 use std::sync::Arc;
 use time::{OffsetDateTime, UtcOffset};
 use ui::{
-    Button, ButtonStyle, CopyButton, Icon, IconButton, IconName, IconSize, Label, LabelSize, Tooltip,
-    prelude::*,
+    Button, ButtonStyle, CopyButton, Icon, IconButton, IconName, IconSize, Label, LabelSize,
+    Tooltip, prelude::*,
 };
 
 pub struct CommitDetailsSidebarData {
