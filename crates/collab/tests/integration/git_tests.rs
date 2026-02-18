@@ -1094,3 +1094,65 @@ async fn test_repository_create_then_remove_worktree(
         "worktree directory should be removed"
     );
 }
+
+#[gpui::test]
+async fn test_repository_create_worktree_remote_emits_event(
+    executor: BackgroundExecutor,
+    cx_a: &mut TestAppContext,
+    cx_b: &mut TestAppContext,
+) {
+    let mut server = TestServer::start(executor.clone()).await;
+    let (_client_a, _client_b, _project_a, repo_b) =
+        setup_remote_git_project(&executor, &mut server, cx_a, cx_b).await;
+
+    // Track WorktreesChanged events on the remote repo.
+    let remote_events = Arc::new(Mutex::new(Vec::new()));
+    let _subscription = cx_b.update(|cx| {
+        let remote_events = remote_events.clone();
+        cx.subscribe(&repo_b, move |_, event: &RepositoryEvent, _| {
+            remote_events.lock().push(event.clone());
+        })
+    });
+
+    // Create a worktree via the remote RPC path.
+    cx_b.update(|cx| {
+        repo_b.update(cx, |repo, cx| {
+            repo.create_worktree(
+                "remote-feature".to_string(),
+                PathBuf::from("/worktrees"),
+                None,
+                cx,
+            )
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    executor.run_until_parked();
+
+    // Verify WorktreesChanged event was emitted on the remote client.
+    assert!(
+        remote_events
+            .lock()
+            .iter()
+            .any(|e| matches!(e, RepositoryEvent::WorktreesChanged)),
+        "WorktreesChanged event should have been emitted on remote client after create"
+    );
+
+    // Verify the worktree was created.
+    let remote_worktrees = cx_b
+        .update(|cx| repo_b.update(cx, |repo, _| repo.worktrees()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        remote_worktrees.len(),
+        1,
+        "remote client should see one worktree after create"
+    );
+    assert_eq!(
+        remote_worktrees[0].path,
+        PathBuf::from("/worktrees/remote-feature"),
+        "remote client should see the created worktree at the expected path"
+    );
+}
