@@ -436,8 +436,7 @@ impl GitRepository for FakeGitRepository {
                     Ok(())
                 }
             })??;
-            // Create directory before updating state so state is never
-            // inconsistent with the filesystem
+            // Create the directory first; if it fails, state is left unchanged.
             fs.create_dir(&path).await?;
             fs.with_git_state(&dot_git_path, true, {
                 let path = path.clone();
@@ -478,8 +477,7 @@ impl GitRepository for FakeGitRepository {
                     Ok(())
                 }
             })??;
-            // Remove directory before updating state so state is never
-            // inconsistent with the filesystem
+            // Remove the directory first; if it fails, state is left unchanged.
             fs.remove_dir(
                 &path,
                 RemoveOptions {
@@ -518,8 +516,7 @@ impl GitRepository for FakeGitRepository {
                     Ok(())
                 }
             })??;
-            // Move directory before updating state so state is never
-            // inconsistent with the filesystem
+            // Move the directory first; if it fails, state is left unchanged.
             fs.rename(
                 &old_path,
                 &new_path,
