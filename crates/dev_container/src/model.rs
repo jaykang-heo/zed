@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path, process::Output, sync::Arc};
+use std::{collections::HashMap, fmt::Debug, path::Path, process::Output, sync::Arc};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json_lenient::Value;
@@ -87,10 +87,12 @@ enum DevContainerBuildType {
 
 impl DevContainer {
     fn validate_structure(&self) -> Result<(), RenameMeError> {
-        todo!()
+        // TODO
+        Ok(())
     }
     fn validate_features(&self) -> Result<(), RenameMeError> {
-        todo!()
+        // TODO
+        Ok(())
     }
 
     fn build_type(&self) -> DevContainerBuildType {
@@ -358,16 +360,18 @@ where
     let s: Option<String> = Option::deserialize(deserializer)?;
     match s {
         Some(json_string) => {
-            dbg!(&json_string);
             let parsed: Vec<HashMap<String, serde_json_lenient::Value>> =
-                serde_json_lenient::from_str(&json_string).map_err(serde::de::Error::custom)?;
+                serde_json_lenient::from_str(&json_string).map_err(|e| {
+                    log::error!("Error deserializing metadata: {e}");
+                    serde::de::Error::custom(e)
+                })?;
             Ok(Some(parsed))
         }
         None => Ok(None),
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
 struct DockerConfigLabels {
     #[serde(
         rename = "devcontainer.metadata",
@@ -376,22 +380,23 @@ struct DockerConfigLabels {
     metadata: Option<Vec<HashMap<String, serde_json_lenient::Value>>>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 struct DockerInspectConfig {
     labels: DockerConfigLabels,
 }
 
-#[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 struct DockerInspectMount {
     source: String,
     destination: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "PascalCase")]
 struct DockerInspect {
+    id: String,
     config: DockerInspectConfig,
     mounts: Option<Vec<DockerInspectMount>>,
 }
@@ -422,6 +427,20 @@ pub(crate) fn read_devcontainer_configuration(
     deserialize_devcontainer_json(&devcontainer_contents)
 }
 
+/// New and improved flow should look like this:
+/// 1. parse the devcontainer file
+/// 2. ensure that object is valid
+/// 3. check for disallowed features (?)
+/// 4. run any initializeCommands
+/// 5. If dockerfile or image config
+///     1. check for existing container by params + id labels (pending rebuild)
+///     2. If exists and running, return it
+///     3. If exists and not running, start it
+///     4. If not exists
+///         1. Build it
+///         2. Run the built thing you just made
+/// 6. If docker-compose config
+///     1. TODO - this is the next thing
 pub(crate) async fn spawn_dev_container_v2(
     config: DevContainerConfig,
     local_project_path: Arc<&Path>,
@@ -460,7 +479,7 @@ pub(crate) async fn spawn_dev_container_v2(
         DevContainerBuildType::Image => {
             log::info!("DevContainer is using an image to build. Checking for existing container");
             //     1. check for existing container by params + id labels (pending rebuild)
-            if let Some(docker_ps) = check_for_existing_container(labels).await? {
+            if let Some(docker_ps) = check_for_existing_container(&labels).await? {
                 log::info!("Dev container already found. Proceeding with it");
                 //     2. If exists and running, return it
                 //
@@ -483,7 +502,31 @@ pub(crate) async fn spawn_dev_container_v2(
                 });
             } else {
                 // let docker_build_thing = build_image(&devcontainer).await?;
-                let docker_image_inspect = inspect_image(&devcontainer).await;
+                let docker_image_inspect = inspect_image(&devcontainer).await?;
+                log::error!("Not yet implemented, exiting");
+                let built_docker_image = build_image(&devcontainer, &docker_image_inspect).await?;
+
+                let running_container = run_docker_image(
+                    &devcontainer,
+                    &built_docker_image,
+                    &labels,
+                    &local_project_path,
+                )
+                .await?;
+
+                let remote_user = get_remote_user_from_config(&running_container, &devcontainer)?;
+                let remote_workspace_folder = get_remote_dir_from_config(
+                    &running_container,
+                    (&local_project_path.display()).to_string(),
+                )?;
+
+                return Ok(DevContainerUp {
+                    _outcome: "todo".to_string(),
+                    container_id: running_container.id,
+                    remote_user,
+                    remote_workspace_folder,
+                });
+
                 //     4. If not exists
                 //         1. Build it
                 //         2. Run the built thing you just made
@@ -502,7 +545,33 @@ pub(crate) async fn spawn_dev_container_v2(
     //         2. Run the built thing you just made
     // 6. If docker-compose config
     //     1. TODO - this is the next thing
-    Err(RenameMeError::UnmappedError)
+    // Err(RenameMeError::UnmappedError)
+}
+
+async fn run_docker_image(
+    devcontainer: &DevContainer,
+    built_docker_image: &DockerInspect,
+    labels: &Vec<(&str, String)>,
+    local_project_path: &Arc<&Path>,
+) -> Result<DockerInspect, RenameMeError> {
+    let mut docker_run_command = create_docker_run_command(
+        &devcontainer,
+        local_project_path,
+        &built_docker_image.config.labels,
+        Some(labels),
+    )?;
+
+    if let Err(e) = docker_run_command.output().await {
+        log::error!("Error running docker run: {e}");
+        return Err(RenameMeError::UnmappedError);
+    }
+
+    log::info!("Checking for container that was started");
+    let Some(docker_ps) = check_for_existing_container(labels).await? else {
+        log::error!("Could not locate container just created");
+        return Err(RenameMeError::UnmappedError);
+    };
+    inspect_running_container(&docker_ps).await
 }
 
 async fn inspect_image(devcontainer: &DevContainer) -> Result<DockerInspect, RenameMeError> {
@@ -523,20 +592,39 @@ async fn inspect_image(devcontainer: &DevContainer) -> Result<DockerInspect, Ren
     Ok(docker_inspect)
 }
 
-async fn build_image(dev_container: &DevContainer) -> Result<DockerInspect, RenameMeError> {
-    let mut command = create_docker_build(&dev_container)?;
+async fn build_image(
+    dev_container: &DevContainer,
+    base_image: &DockerInspect,
+) -> Result<DockerInspect, RenameMeError> {
+    match dev_container.build_type() {
+        DevContainerBuildType::Image => {
+            if dev_container
+                .features
+                .as_ref()
+                .is_none_or(|features| features.is_empty())
+            {
+                log::info!("No features to add. Using base image");
+                return Ok(base_image.clone());
+            }
+            let mut command = create_docker_build(&dev_container)?;
 
-    let output = command.output().await.map_err(|e| {
-        log::error!("Error building docker image: {e}");
-        RenameMeError::UnmappedError
-    })?;
+            let output = command.output().await.map_err(|e| {
+                log::error!("Error building docker image: {e}");
+                RenameMeError::UnmappedError
+            })?;
 
-    // TODO this is probably not the actual thing to return here
-    let Some(docker_inspect): Option<DockerInspect> = deserialize_json_output(output)? else {
-        log::error!("Could not deserialize docker labels");
-        return Err(RenameMeError::UnmappedError);
-    };
-    Ok(docker_inspect)
+            // TODO this is probably not the actual thing to return here
+            let Some(docker_inspect): Option<DockerInspect> = deserialize_json_output(output)?
+            else {
+                log::error!("Could not deserialize docker labels");
+                return Err(RenameMeError::UnmappedError);
+            };
+            Ok(docker_inspect)
+        }
+        DevContainerBuildType::Dockerfile => todo!("not yet implemented"),
+        DevContainerBuildType::DockerCompose => todo!("not yet implemented"),
+        DevContainerBuildType::None => Err(RenameMeError::UnmappedError),
+    }
 }
 
 async fn inspect_running_container(docker_ps: &DockerPs) -> Result<DockerInspect, RenameMeError> {
@@ -558,9 +646,9 @@ async fn inspect_running_container(docker_ps: &DockerPs) -> Result<DockerInspect
 }
 
 async fn check_for_existing_container(
-    labels: Vec<(&str, String)>,
+    labels: &Vec<(&str, String)>,
 ) -> Result<Option<DockerPs>, RenameMeError> {
-    let mut command = create_docker_query_containers(Some(&labels))?;
+    let mut command = create_docker_query_containers(Some(labels))?;
 
     let output = command.output().await.map_err(|e| {
         log::error!("Error executing docker query containers command: {e}");
@@ -568,136 +656,31 @@ async fn check_for_existing_container(
     })?;
 
     // Execute command, get back ids (or not)
-    let docker_ps: Option<DockerPs> = deserialize_json_output(output)?;
+    let docker_ps: Option<DockerPs> = deserialize_json_output(output).map_err(|e| {
+        log::error!("Error deserializing docker PS output: {:?}", e);
+        RenameMeError::UnmappedError
+    })?;
     Ok(docker_ps)
-}
-
-/// New and improved flow should look like this:
-/// 1. parse the devcontainer file
-/// 2. ensure that object is valid
-/// 3. check for disallowed features (?)
-/// 4. run any initializeCommands
-/// 5. If dockerfile or image config
-///     1. check for existing container by params + id labels (pending rebuild)
-///     2. If exists and running, return it
-///     3. If exists and not running, start it
-///     4. If not exists
-///         1. Build it
-///         2. Run the built thing you just made
-/// 6. If docker-compose config
-///     1. TODO - this is the next thing
-pub(crate) async fn spawn_dev_container(
-    config: DevContainerConfig,
-    local_project_path: Arc<&Path>,
-) -> Result<DevContainerUp, RenameMeError> {
-    log::info!(
-        "Starting dev container for project path {}",
-        &local_project_path.display()
-    );
-
-    let labels = vec![
-        (
-            "devcontainer.local_folder",
-            (&local_project_path.display()).to_string(),
-        ),
-        (
-            "devcontainer.config_file",
-            config.config_path.display().to_string(),
-        ),
-    ];
-
-    let config_path = local_project_path.join(config.config_path);
-
-    let devcontainer_contents = std::fs::read_to_string(&config_path).map_err(|e| {
-        log::error!("Unable to read devcontainer contents: {e}");
-        RenameMeError::UnmappedError
-    })?;
-
-    let devcontainer = deserialize_devcontainer_json(&devcontainer_contents)?;
-
-    let mut command = create_docker_query_containers(Some(&labels))?;
-
-    let output = command.output().await.map_err(|e| {
-        log::error!("Error executing docker query containers command: {e}");
-        RenameMeError::UnmappedError
-    })?;
-
-    // Execute command, get back ids (or not)
-    let docker_ps: Option<DockerPs> = deserialize_json_output(output)?;
-
-    if docker_ps.is_none() {
-        log::info!("no docker image found for query, creating one");
-        let mut docker_run_command = create_docker_run_command(
-            &devcontainer,
-            &local_project_path,
-            &DockerConfigLabels { metadata: None },
-            Some(&labels),
-        )?;
-
-        if let Err(e) = docker_run_command.output().await {
-            log::error!("Error running docker run: {e}");
-        }
-    }
-
-    log::info!("Trying to get docker container ID again, now that we've done docker run");
-    let mut command = create_docker_query_containers(Some(&labels))?;
-
-    let output = command.output().await.map_err(|e| {
-        log::error!("Error executing docker query containers: {e}");
-        RenameMeError::UnmappedError
-    })?;
-
-    let docker_ps: Option<DockerPs> = deserialize_json_output(output)?;
-
-    let Some(docker_ps) = docker_ps else {
-        log::error!("After creating with docker run, we still couldn't find anything");
-        return Err(RenameMeError::UnmappedError);
-    };
-
-    log::info!("Getting labels for container {}", &docker_ps.id);
-    let mut command = create_docker_inspect(&docker_ps.id)?;
-
-    let output = command.output().await.map_err(|e| {
-        log::error!(
-            "Error getting labels from docker image {}: {e}",
-            &docker_ps.id
-        );
-        RenameMeError::UnmappedError
-    })?;
-
-    let Some(docker_inspect): Option<DockerInspect> = deserialize_json_output(output)? else {
-        log::error!("Could not deserialize docker labels");
-        return Err(RenameMeError::UnmappedError);
-    };
-
-    let remote_user = get_remote_user_from_config(&docker_inspect, &devcontainer)?;
-
-    let remote_folder =
-        get_remote_dir_from_config(&docker_inspect, (&local_project_path.display()).to_string())?;
-
-    Ok(DevContainerUp {
-        _outcome: "todo".to_string(),
-        container_id: docker_ps.id,
-        remote_user: remote_user,
-        remote_workspace_folder: remote_folder,
-    })
 }
 
 // For this to work, I have to ignore quiet and instead do format=json
 fn deserialize_json_output<T>(output: Output) -> Result<Option<T>, RenameMeError>
 where
     T: for<'de> Deserialize<'de>,
+    T: Debug,
 {
     if output.status.success() {
         let raw = String::from_utf8_lossy(&output.stdout);
         if raw.is_empty() {
             return Ok(None);
         }
-        serde_json_lenient::from_str(&raw).map_err(|e| {
-            dbg!(&e);
+        let value = serde_json_lenient::from_str(&raw).map_err(|e| {
+            log::error!("Error deserializing from raw json: {e}");
             RenameMeError::UnmappedError
-        })
+        });
+        value
     } else {
+        log::error!("Sent non-successful output; cannot deserialize");
         Err(RenameMeError::UnmappedError)
     }
 }
@@ -716,7 +699,7 @@ fn create_docker_build(devcontainer: &DevContainer) -> Result<Command, RenameMeE
     match devcontainer.build_type() {
         DevContainerBuildType::Image => {
             // let's work here
-            let mut command = smol::process::Command::new(docker_cli());
+            let command = smol::process::Command::new(docker_cli());
             Ok(command)
         }
         DevContainerBuildType::Dockerfile => todo!(),
@@ -1650,6 +1633,7 @@ mod test {
             serde_json_lenient::Value::String("vsCode".to_string()),
         );
         let given_docker_config = DockerInspect {
+            id: "docker_id".to_string(),
             config: DockerInspectConfig {
                 labels: DockerConfigLabels {
                     metadata: Some(vec![metadata]),
@@ -1672,6 +1656,7 @@ mod test {
             serde_json_lenient::Value::String("vsCode".to_string()),
         );
         let given_docker_config = DockerInspect {
+            id: "docker_id".to_string(),
             config: DockerInspectConfig {
                 labels: DockerConfigLabels {
                     metadata: Some(vec![metadata]),

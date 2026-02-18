@@ -16,7 +16,7 @@ use worktree::Snapshot;
 
 use crate::{
     DevContainerFeature, DevContainerSettings, DevContainerTemplate,
-    model::{DevContainer, read_devcontainer_configuration, spawn_dev_container},
+    model::{DevContainer, read_devcontainer_configuration, spawn_dev_container_v2},
 };
 
 /// Represents a discovered devcontainer configuration
@@ -298,7 +298,7 @@ pub async fn start_dev_container_with_config(
 
     // let config_path = config.map(|c| directory.join(&c.config_path));
 
-    match spawn_dev_container(actual_config.clone(), Arc::new(directory.as_ref())) // TODO reffing here is gross
+    match spawn_dev_container_v2(actual_config.clone(), Arc::new(directory.as_ref())) // TODO reffing here is gross
         .await
     {
         Ok(DevContainerUp {
