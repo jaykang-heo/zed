@@ -10,8 +10,8 @@ pub use anchor::{Anchor, AnchorRangeExt};
 
 use anyhow::{Result, anyhow};
 use buffer_diff::{
-    BufferDiff, BufferDiffEvent, BufferDiffSnapshot, DiffChanged, DiffHunk,
-    DiffHunkSecondaryStatus, DiffHunkStatus, DiffHunkStatusKind,
+    BufferDiff, BufferDiffEvent, BufferDiffSnapshot, DiffChanged, DiffHunkSecondaryStatus,
+    DiffHunkStatus, DiffHunkStatusKind,
 };
 use clock::ReplicaId;
 use collections::{BTreeMap, Bound, HashMap, HashSet};
@@ -94,6 +94,12 @@ pub struct MultiBuffer {
     /// The writing capability of the multi-buffer.
     capability: Capability,
     buffer_changed_since_sync: Rc<Cell<bool>>,
+}
+
+pub(crate) struct RemoveExcerptsResult {
+    pub edits: Vec<Edit<MultiBufferOffset>>,
+    pub ids: Vec<ExcerptId>,
+    pub removed_buffer_ids: Vec<BufferId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1798,10 +1804,42 @@ impl MultiBuffer {
     ) where
         O: text::ToOffset,
     {
+        let excerpts = self.insert_excerpts_with_ids_after_quietly(
+            prev_excerpt_id,
+            buffer.clone(),
+            ranges,
+            cx,
+        );
+        let Some(excerpts) = excerpts else { return };
+
+        cx.emit(Event::Edited {
+            edited_buffer: None,
+        });
+        cx.emit(Event::ExcerptsAdded {
+            buffer,
+            predecessor: prev_excerpt_id,
+            excerpts,
+        });
+        cx.notify();
+    }
+
+    /// Core insert logic that publishes subscription edits immediately but
+    /// skips event emission and notification. Returns the inserted excerpts
+    /// (for event data) or `None` if there was nothing to insert.
+    fn insert_excerpts_with_ids_after_quietly<O>(
+        &mut self,
+        prev_excerpt_id: ExcerptId,
+        buffer: Entity<Buffer>,
+        ranges: impl IntoIterator<Item = (ExcerptId, ExcerptRange<O>)>,
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<(ExcerptId, ExcerptRange<language::Anchor>)>>
+    where
+        O: text::ToOffset,
+    {
         assert_eq!(self.history.transaction_depth(), 0);
         let mut ranges = ranges.into_iter().peekable();
         if ranges.peek().is_none() {
-            return Default::default();
+            return None;
         }
 
         self.sync_mut(cx);
@@ -1904,19 +1942,12 @@ impl MultiBuffer {
             }],
             DiffChangeKind::BufferEdited,
         );
+
         if !edits.is_empty() {
             self.subscriptions.publish(edits);
         }
 
-        cx.emit(Event::Edited {
-            edited_buffer: None,
-        });
-        cx.emit(Event::ExcerptsAdded {
-            buffer,
-            predecessor: prev_excerpt_id,
-            excerpts,
-        });
-        cx.notify();
+        Some(excerpts)
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
@@ -2192,15 +2223,99 @@ impl MultiBuffer {
         excerpt_ids[0]
     }
 
+    /// Like `merge_excerpts`, but defers event emission and notification.
+    ///
+    /// Resize and removal edits are accumulated into `deferred_edits` and
+    /// `deferred_removes`. The caller must publish and emit after all merges
+    /// are done.
+    pub fn merge_excerpts_quietly(
+        &mut self,
+        excerpt_ids: &[ExcerptId],
+        deferred_removes: &mut Vec<ExcerptId>,
+        cx: &App,
+    ) -> ExcerptId {
+        debug_assert!(!excerpt_ids.is_empty());
+        if excerpt_ids.len() == 1 {
+            return excerpt_ids[0];
+        }
+
+        self.sync_mut(cx);
+        let snapshot = self.snapshot(cx);
+
+        let first_range = snapshot
+            .context_range_for_excerpt(excerpt_ids[0])
+            .expect("first excerpt must exist");
+        let last_range = snapshot
+            .context_range_for_excerpt(*excerpt_ids.last().unwrap())
+            .expect("last excerpt must exist");
+
+        let union_range = first_range.start..last_range.end;
+
+        drop(snapshot);
+
+        let edits = self.resize_excerpt_quietly(excerpt_ids[0], union_range);
+        if !edits.is_empty() {
+            self.subscriptions.publish(edits);
+        }
+        deferred_removes.extend(excerpt_ids[1..].iter().copied());
+
+        excerpt_ids[0]
+    }
+
+    /// Finalize a batch of quiet merge / removal operations on a multibuffer.
+    ///
+    /// Applies the deferred removals in one pass, publishes the removal
+    /// edits, and emits a single round of events.
+    pub fn finish_merge_excerpts(
+        &mut self,
+        deferred_removes: Vec<ExcerptId>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(result) = self.remove_excerpts_quietly(deferred_removes, cx) {
+            if !result.edits.is_empty() {
+                self.subscriptions.publish(result.edits);
+            }
+            cx.emit(Event::Edited {
+                edited_buffer: None,
+            });
+            cx.emit(Event::ExcerptsRemoved {
+                ids: result.ids,
+                removed_buffer_ids: result.removed_buffer_ids,
+            });
+            cx.notify();
+        }
+    }
+
     pub fn remove_excerpts(
         &mut self,
         excerpt_ids: impl IntoIterator<Item = ExcerptId>,
         cx: &mut Context<Self>,
     ) {
+        let result = self.remove_excerpts_quietly(excerpt_ids, cx);
+        let Some(result) = result else { return };
+
+        if !result.edits.is_empty() {
+            self.subscriptions.publish(result.edits);
+        }
+        cx.emit(Event::Edited {
+            edited_buffer: None,
+        });
+        cx.emit(Event::ExcerptsRemoved {
+            ids: result.ids,
+            removed_buffer_ids: result.removed_buffer_ids,
+        });
+        cx.notify();
+    }
+
+    fn remove_excerpts_quietly(
+        &mut self,
+        excerpt_ids: impl IntoIterator<Item = ExcerptId>,
+        cx: &App,
+    ) -> Option<RemoveExcerptsResult> {
         self.sync_mut(cx);
         let ids = excerpt_ids.into_iter().collect::<Vec<_>>();
         if ids.is_empty() {
-            return;
+            return None;
         }
         self.buffer_changed_since_sync.replace(true);
 
@@ -2305,17 +2420,12 @@ impl MultiBuffer {
         }
 
         let edits = Self::sync_diff_transforms(&mut snapshot, edits, DiffChangeKind::BufferEdited);
-        if !edits.is_empty() {
-            self.subscriptions.publish(edits);
-        }
-        cx.emit(Event::Edited {
-            edited_buffer: None,
-        });
-        cx.emit(Event::ExcerptsRemoved {
+
+        Some(RemoveExcerptsResult {
+            edits,
             ids,
             removed_buffer_ids,
-        });
-        cx.notify();
+        })
     }
 
     pub fn wait_for_anchors<'a, Anchors: 'a + Iterator<Item = Anchor>>(
@@ -2855,7 +2965,22 @@ impl MultiBuffer {
         cx: &mut Context<Self>,
     ) {
         self.sync_mut(cx);
+        let edits = self.resize_excerpt_quietly(id, range);
+        if !edits.is_empty() {
+            self.subscriptions.publish(edits);
+        }
+        cx.emit(Event::Edited {
+            edited_buffer: None,
+        });
+        cx.emit(Event::ExcerptsExpanded { ids: vec![id] });
+        cx.notify();
+    }
 
+    fn resize_excerpt_quietly(
+        &mut self,
+        id: ExcerptId,
+        range: Range<text::Anchor>,
+    ) -> Vec<Edit<MultiBufferOffset>> {
         let mut snapshot = self.snapshot.get_mut();
         let locator = snapshot.excerpt_locator_for_id(id);
         let mut new_excerpts = SumTree::default();
@@ -2906,15 +3031,7 @@ impl MultiBuffer {
         drop(cursor);
         snapshot.excerpts = new_excerpts;
 
-        let edits = Self::sync_diff_transforms(&mut snapshot, edits, DiffChangeKind::BufferEdited);
-        if !edits.is_empty() {
-            self.subscriptions.publish(edits);
-        }
-        cx.emit(Event::Edited {
-            edited_buffer: None,
-        });
-        cx.emit(Event::ExcerptsExpanded { ids: vec![id] });
-        cx.notify();
+        Self::sync_diff_transforms(&mut snapshot, edits, DiffChangeKind::BufferEdited)
     }
 
     pub fn expand_excerpts(

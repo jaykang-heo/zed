@@ -671,26 +671,51 @@ impl SplittableEditor {
             convert_lhs_rows_to_rhs,
         );
 
-        // stream this
-        for (path, diff) in path_diffs {
-            self.rhs_multibuffer.update(cx, |rhs_multibuffer, cx| {
-                let sync_result = lhs.multibuffer.update(cx, |lhs_multibuffer, lhs_cx| {
-                    LhsEditor::update_path_excerpts_from_rhs(
-                        path.clone(),
-                        rhs_multibuffer,
-                        lhs_multibuffer,
-                        diff.clone(),
-                        lhs_cx,
-                    )
-                });
+        // Phase 1: Batch all LHS excerpt updates across paths.
+        // Reads from rhs_multibuffer (immutable) and mutates lhs_multibuffer,
+        // deferring all excerpt removals into a single batch.
+        let sync_results: Vec<_> = self.rhs_multibuffer.update(cx, |rhs_multibuffer, cx| {
+            lhs.multibuffer.update(cx, |lhs_multibuffer, lhs_cx| {
+                let mut deferred_removes = Vec::new();
 
+                let results: Vec<_> = path_diffs
+                    .iter()
+                    .map(|(path, diff)| {
+                        LhsEditor::update_path_excerpts_from_rhs_quietly(
+                            path.clone(),
+                            rhs_multibuffer,
+                            lhs_multibuffer,
+                            diff.clone(),
+                            &mut deferred_removes,
+                            lhs_cx,
+                        )
+                    })
+                    .collect();
+
+                lhs_multibuffer.finish_excerpt_updates(deferred_removes, lhs_cx);
+
+                results
+            })
+        });
+
+        // Phase 2: Apply RHS merge operations and build companion mappings.
+        // Batches all resize + remove operations from merge_excerpts into a
+        // single pass to avoid per-group SumTree rebuilds and event cascades.
+        self.rhs_multibuffer.update(cx, |rhs_multibuffer, cx| {
+            let mut deferred_removes = Vec::new();
+
+            for ((_, diff), sync_result) in path_diffs.iter().zip(sync_results.into_iter()) {
                 if let Some((lhs_excerpt_ids, rhs_merge_groups)) = sync_result {
                     let mut final_rhs_ids = Vec::with_capacity(lhs_excerpt_ids.len());
                     for group in rhs_merge_groups {
                         if group.len() == 1 {
                             final_rhs_ids.push(group[0]);
                         } else {
-                            let merged_id = rhs_multibuffer.merge_excerpts(&group, cx);
+                            let merged_id = rhs_multibuffer.merge_excerpts_quietly(
+                                &group,
+                                &mut deferred_removes,
+                                cx,
+                            );
                             final_rhs_ids.push(merged_id);
                         }
                     }
@@ -702,8 +727,10 @@ impl SplittableEditor {
                     let rhs_buffer_id = diff.read(cx).buffer_id;
                     companion.add_buffer_mapping(lhs_buffer_id, rhs_buffer_id);
                 }
-            });
-        }
+            }
+
+            rhs_multibuffer.finish_merge_excerpts(deferred_removes, cx);
+        });
 
         let companion = cx.new(|_| companion);
 
@@ -2013,8 +2040,35 @@ impl LhsEditor {
         diff: Entity<BufferDiff>,
         lhs_cx: &mut Context<MultiBuffer>,
     ) -> Option<(Vec<ExcerptId>, Vec<Vec<ExcerptId>>)> {
+        let mut deferred_removes = Vec::new();
+        let result = Self::update_path_excerpts_from_rhs_quietly(
+            path_key,
+            rhs_multibuffer,
+            lhs_multibuffer,
+            diff,
+            &mut deferred_removes,
+            lhs_cx,
+        );
+        lhs_multibuffer.finish_excerpt_updates(deferred_removes, lhs_cx);
+        result
+    }
+
+    /// Like `update_path_excerpts_from_rhs`, but defers excerpt removals and
+    /// insert notifications into the provided collectors. The caller must call
+    /// `MultiBuffer::finish_excerpt_updates` after all paths have been
+    /// processed.
+    fn update_path_excerpts_from_rhs_quietly(
+        path_key: PathKey,
+        rhs_multibuffer: &MultiBuffer,
+        lhs_multibuffer: &mut MultiBuffer,
+        diff: Entity<BufferDiff>,
+        deferred_removes: &mut Vec<ExcerptId>,
+        lhs_cx: &mut Context<MultiBuffer>,
+    ) -> Option<(Vec<ExcerptId>, Vec<Vec<ExcerptId>>)> {
         let Some(excerpt_id) = rhs_multibuffer.excerpts_for_path(&path_key).next() else {
-            lhs_multibuffer.remove_excerpts_for_path(path_key, lhs_cx);
+            let remove_ids: Vec<ExcerptId> = lhs_multibuffer.excerpts_for_path(&path_key).collect();
+            deferred_removes.extend(remove_ids);
+            lhs_multibuffer.clear_path_excerpt_mappings(path_key);
             return None;
         };
 
@@ -2054,11 +2108,12 @@ impl LhsEditor {
             })
             .collect();
 
-        let lhs_result = lhs_multibuffer.update_path_excerpts(
+        let lhs_result = lhs_multibuffer.update_path_excerpts_quietly(
             path_key,
             base_text_buffer.clone(),
             &base_text_buffer_snapshot,
             new,
+            deferred_removes,
             lhs_cx,
         );
         if !lhs_result.excerpt_ids.is_empty()
