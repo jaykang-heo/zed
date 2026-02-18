@@ -5629,6 +5629,7 @@ impl Repository {
             move |repo, mut cx| async move {
                 match repo {
                     RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        // TODO would be nice to not have to do this manually
                         let result = backend.remove_worktree(path, force).await;
                         if result.is_ok() {
                             this.update(&mut cx, |_this, cx| {
@@ -5648,6 +5649,7 @@ impl Repository {
                             })
                             .await?;
 
+                        // TODO would be nice to not have to do this manually
                         this.update(&mut cx, |_this, cx| {
                             cx.emit(RepositoryEvent::WorktreesChanged);
                         })
@@ -5673,6 +5675,7 @@ impl Repository {
             move |repo, mut cx| async move {
                 match repo {
                     RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
+                        // TODO would be nice to not have to do this manually
                         let result = backend.rename_worktree(old_path, new_path).await;
                         if result.is_ok() {
                             this.update(&mut cx, |_this, cx| {
@@ -5692,6 +5695,7 @@ impl Repository {
                             })
                             .await?;
 
+                        // TODO would be nice to not have to do this manually
                         this.update(&mut cx, |_this, cx| {
                             cx.emit(RepositoryEvent::WorktreesChanged);
                         })

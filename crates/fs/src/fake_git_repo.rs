@@ -462,8 +462,8 @@ impl GitRepository for FakeGitRepository {
         let dot_git_path = self.dot_git_path.clone();
         async move {
             executor.simulate_random_delay().await;
-            // Validate, check dirty state, and remove from state in one lock
-            fs.with_git_state(&dot_git_path, true, {
+            // Validate before any side effects (read-only check)
+            fs.with_git_state(&dot_git_path, false, {
                 let path = path.clone();
                 move |state| {
                     if !state.worktrees.iter().any(|w| w.path == path) {
@@ -472,12 +472,11 @@ impl GitRepository for FakeGitRepository {
                     if !force && state.dirty_worktrees.contains(&path) {
                         bail!("worktree '{}' contains modified or untracked files, use --force to delete", path.display());
                     }
-                    state.dirty_worktrees.remove(&path);
-                    state.worktrees.retain(|worktree| worktree.path != path);
                     Ok(())
                 }
             })??;
-            // Now remove the directory
+            // Remove directory before updating state so state is never
+            // inconsistent with the filesystem
             fs.remove_dir(
                 &path,
                 RemoveOptions {
@@ -486,6 +485,15 @@ impl GitRepository for FakeGitRepository {
                 },
             )
             .await?;
+            // Update state
+            fs.with_git_state(&dot_git_path, true, {
+                let path = path.clone();
+                move |state| {
+                    state.dirty_worktrees.remove(&path);
+                    state.worktrees.retain(|worktree| worktree.path != path);
+                    Ok::<(), anyhow::Error>(())
+                }
+            })??;
             Ok(())
         }
         .boxed()
@@ -497,23 +505,18 @@ impl GitRepository for FakeGitRepository {
         let dot_git_path = self.dot_git_path.clone();
         async move {
             executor.simulate_random_delay().await;
-            let new_path_clone = new_path.clone();
-            // Validate and update state in one lock
-            fs.with_git_state(&dot_git_path, true, {
+            // Validate before any side effects (read-only check)
+            fs.with_git_state(&dot_git_path, false, {
                 let old_path = old_path.clone();
                 move |state| {
-                    let Some(worktree) = state.worktrees.iter_mut().find(|w| w.path == old_path)
-                    else {
+                    if !state.worktrees.iter().any(|w| w.path == old_path) {
                         bail!("no worktree found at path: {}", old_path.display());
-                    };
-                    worktree.path = new_path_clone.clone();
-                    if state.dirty_worktrees.remove(&old_path) {
-                        state.dirty_worktrees.insert(new_path_clone);
                     }
                     Ok(())
                 }
             })??;
-            // Now move the directory
+            // Move directory before updating state so state is never
+            // inconsistent with the filesystem
             fs.rename(
                 &old_path,
                 &new_path,
@@ -524,6 +527,19 @@ impl GitRepository for FakeGitRepository {
                 },
             )
             .await?;
+            // Update state
+            fs.with_git_state(&dot_git_path, true, move |state| {
+                let worktree = state
+                    .worktrees
+                    .iter_mut()
+                    .find(|w| w.path == old_path)
+                    .expect("worktree was validated above");
+                worktree.path = new_path.clone();
+                if state.dirty_worktrees.remove(&old_path) {
+                    state.dirty_worktrees.insert(new_path);
+                }
+                Ok::<(), anyhow::Error>(())
+            })??;
             Ok(())
         }
         .boxed()

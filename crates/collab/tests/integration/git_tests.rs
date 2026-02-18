@@ -392,7 +392,6 @@ async fn test_repository_remove_nonexistent_worktree_remote_error(
 async fn test_repository_worktree_ops_local(
     executor: BackgroundExecutor,
     cx_a: &mut TestAppContext,
-    _cx_b: &mut TestAppContext,
 ) {
     let mut server = TestServer::start(executor.clone()).await;
     let client = server.create_client(cx_a, "user").await;
@@ -584,6 +583,114 @@ async fn test_repository_rename_nonexistent_worktree_remote_error(
             assert!(
                 state.worktrees.is_empty(),
                 "host should still have no worktrees"
+            );
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+async fn test_repository_remove_dirty_worktree(
+    executor: BackgroundExecutor,
+    cx_a: &mut TestAppContext,
+    cx_b: &mut TestAppContext,
+) {
+    let mut server = TestServer::start(executor.clone()).await;
+    let (client_a, _client_b, _project_a, repo_b) =
+        setup_remote_git_project(&executor, &mut server, cx_a, cx_b).await;
+
+    // Pre-populate a dirty worktree on the host.
+    client_a
+        .fs()
+        .create_dir(Path::new("/worktrees/dirty-branch"))
+        .await
+        .unwrap();
+    client_a
+        .fs()
+        .with_git_state(Path::new(path!("/project/.git")), false, |state| {
+            state.worktrees.push(git::repository::Worktree {
+                path: PathBuf::from("/worktrees/dirty-branch"),
+                ref_name: "refs/heads/dirty-branch".into(),
+                sha: "abc123".into(),
+            });
+            state
+                .dirty_worktrees
+                .insert(PathBuf::from("/worktrees/dirty-branch"));
+        })
+        .unwrap();
+
+    // Verify the worktree exists.
+    let worktrees = cx_b
+        .update(|cx| repo_b.update(cx, |repo, _| repo.worktrees()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(worktrees.len(), 1, "should have one worktree");
+
+    // Try to remove without force — should fail because it's dirty.
+    let result = cx_b
+        .update(|cx| {
+            repo_b.update(cx, |repo, cx| {
+                repo.remove_worktree(PathBuf::from("/worktrees/dirty-branch"), false, cx)
+            })
+        })
+        .await
+        .unwrap();
+    assert!(
+        result.is_err(),
+        "removing a dirty worktree without force should fail"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("modified or untracked"),
+        "error should mention modified or untracked files, got: {err_msg}"
+    );
+    executor.run_until_parked();
+
+    // Verify the worktree is still there.
+    let worktrees = cx_b
+        .update(|cx| repo_b.update(cx, |repo, _| repo.worktrees()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        worktrees.len(),
+        1,
+        "worktree should still exist after failed removal"
+    );
+
+    // Now remove with force — should succeed.
+    cx_b.update(|cx| {
+        repo_b.update(cx, |repo, cx| {
+            repo.remove_worktree(PathBuf::from("/worktrees/dirty-branch"), true, cx)
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    executor.run_until_parked();
+
+    // Verify the worktree was removed.
+    let worktrees = cx_b
+        .update(|cx| repo_b.update(cx, |repo, _| repo.worktrees()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        worktrees.is_empty(),
+        "worktree should be removed after force removal"
+    );
+
+    // Verify host state is also clean.
+    client_a
+        .fs()
+        .with_git_state(Path::new(path!("/project/.git")), false, |state| {
+            assert!(
+                state.worktrees.is_empty(),
+                "host should have no worktrees after force removal"
+            );
+            assert!(
+                state.dirty_worktrees.is_empty(),
+                "host should have no dirty worktrees after force removal"
             );
         })
         .unwrap();
