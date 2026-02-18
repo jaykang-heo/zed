@@ -231,6 +231,15 @@ async fn test_repository_remove_worktree_remote_roundtrip(
         "should have one worktree before removal"
     );
 
+    // Track WorktreesChanged events on the remote repo.
+    let remote_events = Arc::new(Mutex::new(Vec::new()));
+    let _subscription = cx_b.update(|cx| {
+        let remote_events = remote_events.clone();
+        cx.subscribe(&repo_b, move |_, event: &RepositoryEvent, _| {
+            remote_events.lock().push(event.clone());
+        })
+    });
+
     // Remove the worktree via the remote RPC path.
     cx_b.update(|cx| {
         repo_b.update(cx, |repo, cx| {
@@ -241,6 +250,15 @@ async fn test_repository_remove_worktree_remote_roundtrip(
     .unwrap()
     .unwrap();
     executor.run_until_parked();
+
+    // Verify WorktreesChanged event was emitted on the remote client.
+    assert!(
+        remote_events
+            .lock()
+            .iter()
+            .any(|e| matches!(e, RepositoryEvent::WorktreesChanged)),
+        "WorktreesChanged event should have been emitted on remote client after remove"
+    );
 
     // Verify the directory was removed from the filesystem.
     assert!(
@@ -310,6 +328,15 @@ async fn test_repository_rename_worktree_remote_roundtrip(
         .unwrap();
     assert_eq!(worktrees.len(), 1, "should have one worktree before rename");
 
+    // Track WorktreesChanged events on the remote repo.
+    let remote_events = Arc::new(Mutex::new(Vec::new()));
+    let _subscription = cx_b.update(|cx| {
+        let remote_events = remote_events.clone();
+        cx.subscribe(&repo_b, move |_, event: &RepositoryEvent, _| {
+            remote_events.lock().push(event.clone());
+        })
+    });
+
     // Rename the worktree via the remote RPC path.
     cx_b.update(|cx| {
         repo_b.update(cx, |repo, cx| {
@@ -324,6 +351,15 @@ async fn test_repository_rename_worktree_remote_roundtrip(
     .unwrap()
     .unwrap();
     executor.run_until_parked();
+
+    // Verify WorktreesChanged event was emitted on the remote client.
+    assert!(
+        remote_events
+            .lock()
+            .iter()
+            .any(|e| matches!(e, RepositoryEvent::WorktreesChanged)),
+        "WorktreesChanged event should have been emitted on remote client after rename"
+    );
 
     // Verify the filesystem reflects the rename.
     assert!(
@@ -744,4 +780,317 @@ async fn test_repository_remove_dirty_worktree(
             );
         })
         .unwrap();
+}
+
+#[gpui::test]
+async fn test_repository_create_worktree_emits_event(
+    executor: BackgroundExecutor,
+    cx_a: &mut TestAppContext,
+) {
+    let mut server = TestServer::start(executor.clone()).await;
+    let client = server.create_client(cx_a, "user").await;
+
+    client
+        .fs()
+        .insert_tree(path!("/project"), json!({ ".git": {} }))
+        .await;
+    client
+        .fs()
+        .insert_branches(Path::new(path!("/project/.git")), &["main"]);
+
+    let (project, _) = client.build_local_project(path!("/project"), cx_a).await;
+    executor.run_until_parked();
+
+    let repo = cx_a.update(|cx| project.read(cx).active_repository(cx).unwrap());
+
+    // Track WorktreesChanged events.
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let _subscription = cx_a.update(|cx| {
+        let events = events.clone();
+        cx.subscribe(&repo, move |_, event: &RepositoryEvent, _| {
+            events.lock().push(event.clone());
+        })
+    });
+
+    // Create a worktree via the local code path.
+    cx_a.update(|cx| {
+        repo.update(cx, |repo, cx| {
+            repo.create_worktree(
+                "new-feature".to_string(),
+                PathBuf::from("/worktrees"),
+                None,
+                cx,
+            )
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    executor.run_until_parked();
+
+    // Verify WorktreesChanged event was emitted.
+    assert!(
+        events
+            .lock()
+            .iter()
+            .any(|e| matches!(e, RepositoryEvent::WorktreesChanged)),
+        "WorktreesChanged event should have been emitted after create_worktree"
+    );
+
+    // Verify the worktree was actually created.
+    let worktrees = cx_a
+        .update(|cx| repo.update(cx, |repo, _| repo.worktrees()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(worktrees.len(), 1, "should have one worktree after create");
+    assert_eq!(
+        worktrees[0].path,
+        PathBuf::from("/worktrees/new-feature"),
+        "worktree should be at expected path"
+    );
+}
+
+#[gpui::test]
+async fn test_repository_remove_dirty_worktree_local(
+    executor: BackgroundExecutor,
+    cx_a: &mut TestAppContext,
+) {
+    let mut server = TestServer::start(executor.clone()).await;
+    let client = server.create_client(cx_a, "user").await;
+
+    client
+        .fs()
+        .insert_tree(path!("/project"), json!({ ".git": {} }))
+        .await;
+    client
+        .fs()
+        .insert_branches(Path::new(path!("/project/.git")), &["main"]);
+
+    let (project, _) = client.build_local_project(path!("/project"), cx_a).await;
+    executor.run_until_parked();
+
+    let repo = cx_a.update(|cx| project.read(cx).active_repository(cx).unwrap());
+
+    // Set up a dirty worktree.
+    client
+        .fs()
+        .create_dir(Path::new("/worktrees/dirty-local"))
+        .await
+        .unwrap();
+    client
+        .fs()
+        .with_git_state(Path::new(path!("/project/.git")), false, |state| {
+            state.worktrees.push(git::repository::Worktree {
+                path: PathBuf::from("/worktrees/dirty-local"),
+                ref_name: "refs/heads/dirty-local".into(),
+                sha: "abc123".into(),
+            });
+            state
+                .dirty_worktrees
+                .insert(PathBuf::from("/worktrees/dirty-local"));
+        })
+        .unwrap();
+
+    // Non-force removal should fail.
+    let result = cx_a
+        .update(|cx| {
+            repo.update(cx, |repo, cx| {
+                repo.remove_worktree(PathBuf::from("/worktrees/dirty-local"), false, cx)
+            })
+        })
+        .await
+        .unwrap();
+    assert!(
+        result.is_err(),
+        "removing a dirty worktree without force should fail locally"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("modified or untracked"),
+        "error should mention modified or untracked files, got: {err_msg}"
+    );
+
+    // Directory should still exist.
+    assert!(
+        client
+            .fs()
+            .is_dir(Path::new("/worktrees/dirty-local"))
+            .await,
+        "directory should still exist after failed removal"
+    );
+
+    // Force removal should succeed.
+    cx_a.update(|cx| {
+        repo.update(cx, |repo, cx| {
+            repo.remove_worktree(PathBuf::from("/worktrees/dirty-local"), true, cx)
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    executor.run_until_parked();
+
+    assert!(
+        !client
+            .fs()
+            .is_dir(Path::new("/worktrees/dirty-local"))
+            .await,
+        "directory should be removed after force removal"
+    );
+}
+
+#[gpui::test]
+async fn test_repository_rename_worktree_destination_exists(
+    executor: BackgroundExecutor,
+    cx_a: &mut TestAppContext,
+) {
+    let mut server = TestServer::start(executor.clone()).await;
+    let client = server.create_client(cx_a, "user").await;
+
+    client
+        .fs()
+        .insert_tree(path!("/project"), json!({ ".git": {} }))
+        .await;
+    client
+        .fs()
+        .insert_branches(Path::new(path!("/project/.git")), &["main"]);
+
+    let (project, _) = client.build_local_project(path!("/project"), cx_a).await;
+    executor.run_until_parked();
+
+    let repo = cx_a.update(|cx| project.read(cx).active_repository(cx).unwrap());
+
+    // Set up a source worktree and a pre-existing destination directory.
+    client
+        .fs()
+        .create_dir(Path::new("/worktrees/source"))
+        .await
+        .unwrap();
+    client
+        .fs()
+        .create_dir(Path::new("/worktrees/destination"))
+        .await
+        .unwrap();
+    client
+        .fs()
+        .with_git_state(Path::new(path!("/project/.git")), false, |state| {
+            state.worktrees.push(git::repository::Worktree {
+                path: PathBuf::from("/worktrees/source"),
+                ref_name: "refs/heads/source".into(),
+                sha: "abc123".into(),
+            });
+        })
+        .unwrap();
+
+    // Rename should fail because destination already exists.
+    let result = cx_a
+        .update(|cx| {
+            repo.update(cx, |repo, cx| {
+                repo.rename_worktree(
+                    PathBuf::from("/worktrees/source"),
+                    PathBuf::from("/worktrees/destination"),
+                    cx,
+                )
+            })
+        })
+        .await
+        .unwrap();
+    assert!(
+        result.is_err(),
+        "rename to an existing destination should fail"
+    );
+
+    // Source directory should still exist.
+    assert!(
+        client.fs().is_dir(Path::new("/worktrees/source")).await,
+        "source directory should still exist after failed rename"
+    );
+
+    // Worktree should still be at original path.
+    let worktrees = cx_a
+        .update(|cx| repo.update(cx, |repo, _| repo.worktrees()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(worktrees.len(), 1);
+    assert_eq!(worktrees[0].path, PathBuf::from("/worktrees/source"));
+}
+
+#[gpui::test]
+async fn test_repository_create_then_remove_worktree(
+    executor: BackgroundExecutor,
+    cx_a: &mut TestAppContext,
+) {
+    let mut server = TestServer::start(executor.clone()).await;
+    let client = server.create_client(cx_a, "user").await;
+
+    client
+        .fs()
+        .insert_tree(path!("/project"), json!({ ".git": {} }))
+        .await;
+    client
+        .fs()
+        .insert_branches(Path::new(path!("/project/.git")), &["main"]);
+
+    let (project, _) = client.build_local_project(path!("/project"), cx_a).await;
+    executor.run_until_parked();
+
+    let repo = cx_a.update(|cx| project.read(cx).active_repository(cx).unwrap());
+
+    // No worktrees initially.
+    let worktrees = cx_a
+        .update(|cx| repo.update(cx, |repo, _| repo.worktrees()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(worktrees.is_empty(), "should start with no worktrees");
+
+    // Create a worktree.
+    cx_a.update(|cx| {
+        repo.update(cx, |repo, cx| {
+            repo.create_worktree("feature".to_string(), PathBuf::from("/worktrees"), None, cx)
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    executor.run_until_parked();
+
+    let worktrees = cx_a
+        .update(|cx| repo.update(cx, |repo, _| repo.worktrees()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(worktrees.len(), 1, "should have one worktree after create");
+    assert_eq!(worktrees[0].path, PathBuf::from("/worktrees/feature"));
+    assert!(
+        client.fs().is_dir(Path::new("/worktrees/feature")).await,
+        "worktree directory should exist after create"
+    );
+
+    // Remove the worktree.
+    cx_a.update(|cx| {
+        repo.update(cx, |repo, cx| {
+            repo.remove_worktree(PathBuf::from("/worktrees/feature"), false, cx)
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    executor.run_until_parked();
+
+    let worktrees = cx_a
+        .update(|cx| repo.update(cx, |repo, _| repo.worktrees()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        worktrees.is_empty(),
+        "should have no worktrees after remove"
+    );
+    assert!(
+        !client.fs().is_dir(Path::new("/worktrees/feature")).await,
+        "worktree directory should be removed"
+    );
 }

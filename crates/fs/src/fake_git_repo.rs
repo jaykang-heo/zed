@@ -424,11 +424,17 @@ impl GitRepository for FakeGitRepository {
             let path = directory.join(&name);
             executor.simulate_random_delay().await;
             // Check for simulated error before any side effects
-            fs.with_git_state(&dot_git_path, false, |state| {
-                if let Some(message) = &state.simulated_create_worktree_error {
-                    anyhow::bail!("{message}");
+            fs.with_git_state(&dot_git_path, false, {
+                let name = name.clone();
+                move |state| {
+                    if let Some(message) = &state.simulated_create_worktree_error {
+                        anyhow::bail!("{message}");
+                    }
+                    if state.branches.contains(&name) {
+                        bail!("a branch named '{}' already exists", name);
+                    }
+                    Ok(())
                 }
-                Ok(())
             })??;
             // Create directory before updating state so state is never
             // inconsistent with the filesystem
@@ -436,9 +442,6 @@ impl GitRepository for FakeGitRepository {
             fs.with_git_state(&dot_git_path, true, {
                 let path = path.clone();
                 move |state| {
-                    if state.branches.contains(&name) {
-                        bail!("a branch named '{}' already exists", name);
-                    }
                     let ref_name = format!("refs/heads/{name}");
                     let sha = from_commit.unwrap_or_else(|| "fake-sha".to_string());
                     state.refs.insert(ref_name.clone(), sha.clone());

@@ -201,10 +201,21 @@ impl Worktree {
     }
 }
 
+/// Parses the output of `git worktree list --porcelain` into a list of worktrees.
+///
+/// Entries without a `branch` line (detached HEAD, bare worktrees) are silently
+/// omitted from the result, since only branch-tracked worktrees are relevant to
+/// the callers of this function.
 pub fn parse_worktrees_from_str<T: AsRef<str>>(raw_worktrees: T) -> Vec<Worktree> {
     let mut worktrees = Vec::new();
-    let normalized = raw_worktrees.as_ref().replace("\r\n", "\n");
-    let entries = normalized.split("\n\n");
+    let raw = raw_worktrees.as_ref();
+    let normalized;
+    let entries = if raw.contains("\r\n") {
+        normalized = raw.replace("\r\n", "\n");
+        normalized.split("\n\n")
+    } else {
+        raw.split("\n\n")
+    };
     for entry in entries {
         let mut path = None;
         let mut sha = None;

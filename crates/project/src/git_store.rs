@@ -5678,23 +5678,7 @@ impl Repository {
             },
         )
     }
-}
 
-fn emit_worktrees_changed(
-    this: &WeakEntity<Repository>,
-    cx: &mut AsyncApp,
-    result: Result<()>,
-) -> Result<()> {
-    if result.is_ok() {
-        this.update(cx, |_this, cx| {
-            cx.emit(RepositoryEvent::WorktreesChanged);
-        })
-        .log_err();
-    }
-    result
-}
-
-impl Repository {
     pub fn default_branch(
         &mut self,
         include_remote_name: bool,
@@ -6475,6 +6459,23 @@ impl Repository {
             .clone()
             .or(self.remote_origin_url.clone())
     }
+}
+
+fn emit_worktrees_changed(
+    this: &WeakEntity<Repository>,
+    cx: &mut AsyncApp,
+    result: Result<()>,
+) -> Result<()> {
+    if result.is_ok() {
+        // The entity may have been dropped (e.g. project closed) while the job
+        // was in flight. In that case there is nobody left to care about the
+        // event, so swallowing the update error is intentional.
+        this.update(cx, |_this, cx| {
+            cx.emit(RepositoryEvent::WorktreesChanged);
+        })
+        .log_err();
+    }
+    result
 }
 
 fn get_permalink_in_rust_registry_src(
