@@ -29,6 +29,12 @@
       "title": "Enable type on search by default for the project search",
       "file": "suggestions/PR-49374.md",
       "date": "2026-02-18T21:41:23Z"
+    },
+    {
+      "pr": 49139,
+      "title": "Add agent worktree directory setting + worktree info persistence",
+      "file": "suggestions/PR-49139.md",
+      "date": "2026-02-18T22:21:39Z"
     }
   ]
 }
