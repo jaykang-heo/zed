@@ -17,12 +17,13 @@ use messages::*;
 use postage::watch;
 use serde::{Deserialize, Serialize};
 use settings::SettingsStore;
-use smol::io::AsyncWriteExt;
-use std::{path::PathBuf, sync::Arc};
+use smol::{
+    io::AsyncWriteExt,
+    process::{Child, ChildStdin, ChildStdout},
+};
+use std::{path::PathBuf, process::Stdio, sync::Arc};
 use ui::prelude::*;
 use util::ResultExt;
-use util::command::Child;
-use util::command::Stdio;
 
 actions!(
     supermaven,
@@ -270,7 +271,7 @@ impl SupermavenAgent {
         client: Arc<Client>,
         cx: &mut Context<Supermaven>,
     ) -> Result<Self> {
-        let mut process = util::command::new_command(&binary_path)
+        let mut process = util::command::new_smol_command(&binary_path)
             .arg("stdio")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -307,9 +308,9 @@ impl SupermavenAgent {
         })
     }
 
-    async fn handle_outgoing_messages<W: smol::io::AsyncWrite + Unpin>(
+    async fn handle_outgoing_messages(
         mut outgoing: mpsc::UnboundedReceiver<OutboundMessage>,
-        mut stdin: W,
+        mut stdin: ChildStdin,
     ) -> Result<()> {
         while let Some(message) = outgoing.next().await {
             let bytes = serde_json::to_vec(&message)?;
@@ -319,9 +320,9 @@ impl SupermavenAgent {
         Ok(())
     }
 
-    async fn handle_incoming_messages<R: smol::io::AsyncRead + Unpin>(
+    async fn handle_incoming_messages(
         this: WeakEntity<Supermaven>,
-        stdout: R,
+        stdout: ChildStdout,
         cx: &mut AsyncApp,
     ) -> Result<()> {
         const MESSAGE_PREFIX: &str = "SM-MESSAGE ";

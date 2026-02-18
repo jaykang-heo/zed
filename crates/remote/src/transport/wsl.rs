@@ -11,17 +11,16 @@ use gpui::{App, AppContext as _, AsyncApp, Task};
 use release_channel::{AppVersion, ReleaseChannel};
 use rpc::proto::Envelope;
 use semver::Version;
-use smol::fs;
+use smol::{fs, process};
 use std::{
     ffi::OsStr,
     fmt::Write as _,
     path::{Path, PathBuf},
+    process::Stdio,
     sync::Arc,
     time::Instant,
 };
-
 use util::{
-    command::Stdio,
     paths::{PathStyle, RemotePathBuf},
     rel_path::RelPath,
     shell::{Shell, ShellKind},
@@ -596,9 +595,7 @@ pub fn wsl_path_to_windows_path(
     }
 }
 
-fn run_wsl_command_impl(
-    mut command: util::command::Command,
-) -> impl Future<Output = Result<String>> {
+fn run_wsl_command_impl(mut command: process::Command) -> impl Future<Output = Result<String>> {
     async move {
         let output = command
             .output()
@@ -625,8 +622,8 @@ fn wsl_command_impl(
     program: &str,
     args: &[impl AsRef<OsStr>],
     exec: bool,
-) -> util::command::Command {
-    let mut command = util::command::new_command("wsl.exe");
+) -> process::Command {
+    let mut command = util::command::new_smol_command("wsl.exe");
 
     if let Some(user) = &options.user {
         command.arg("--user").arg(user);
