@@ -17,6 +17,7 @@ pub struct SettingsInputField {
     display_confirm_button: bool,
     display_clear_button: bool,
     clear_on_confirm: bool,
+    confirm_on_blur: bool,
     action_slot: Option<AnyElement>,
     color: Option<Color>,
 }
@@ -33,6 +34,7 @@ impl SettingsInputField {
             display_confirm_button: false,
             display_clear_button: false,
             clear_on_confirm: false,
+            confirm_on_blur: false,
             action_slot: None,
             color: None,
         }
@@ -58,6 +60,11 @@ impl SettingsInputField {
         confirm: impl Fn(Option<String>, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.confirm = Some(Rc::new(confirm));
+        self
+    }
+
+    pub fn confirm_on_blur(mut self) -> Self {
+        self.confirm_on_blur = true;
         self
     }
 
@@ -152,9 +159,18 @@ impl RenderOnce for SettingsInputField {
         if let Some(initial_text) = &self.initial_text {
             let current_text = editor.read(cx).text(cx);
             if current_text != *initial_text && !editor.read(cx).is_focused(window) {
-                editor.update(cx, |editor, cx| {
-                    editor.set_text(initial_text.clone(), window, cx);
-                });
+                if let Some(confirm) = self.confirm_on_blur.then(|| self.confirm.clone()).flatten()
+                {
+                    let text = current_text;
+                    window.defer(cx, move |window, cx| {
+                        let value = (!text.is_empty()).then_some(text);
+                        confirm(value, window, cx);
+                    });
+                } else {
+                    editor.update(cx, |editor, cx| {
+                        editor.set_text(initial_text.clone(), window, cx);
+                    });
+                }
             }
         }
 

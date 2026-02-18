@@ -979,6 +979,7 @@ fn render_user_pattern_row(
         .tab_index(0)
         .with_buffer_font()
         .color(Color::Default)
+        .confirm_on_blur()
         .action_slot(
             IconButton::new(delete_id, IconName::Trash)
                 .icon_size(IconSize::Small)
