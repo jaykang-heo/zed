@@ -39,17 +39,7 @@ use feature_flags::{DiffReviewFeatureFlag, FeatureFlagAppExt as _};
 use file_icons::FileIcons;
 use git::{Oid, blame::BlameEntry, commit::ParsedCommitMessage, status::FileStatus};
 use gpui::{
-    Action, Along, AnyElement, App, AppContext, AvailableSpace, Axis as ScrollbarAxis, BorderStyle,
-    Bounds, ClickEvent, ClipboardItem, ContentMask, Context, Corner, Corners, CursorStyle,
-    DispatchPhase, Edges, Element, ElementInputHandler, Entity, Focusable as _, FontId, FontWeight,
-    GlobalElementId, Hitbox, HitboxBehavior, Hsla, InteractiveElement, IntoElement, IsZero,
-    KeybindingKeystroke, Length, Modifiers, ModifiersChangedEvent, MouseButton, MouseClickEvent,
-    MouseDownEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent, PaintQuad, ParentElement,
-    Pixels, PressureStage, ScrollDelta, ScrollHandle, ScrollWheelEvent, ShapedLine, SharedString,
-    Size, StatefulInteractiveElement, Style, Styled, StyledText, TextAlign, TextRun,
-    TextStyleRefinement, WeakEntity, Window, anchored, checkerboard, deferred, div, fill,
-    linear_color_stop, linear_gradient, outline, point, px, quad, relative, size, solid_background,
-    transparent_black,
+    Action, Along, AnyElement, App, AppContext, AvailableSpace, Axis as ScrollbarAxis, BorderStyle, Bounds, ClickEvent, ClipboardItem, ContentMask, Context, Corner, Corners, CursorStyle, DispatchPhase, Edges, Element, ElementInputHandler, Entity, Focusable as _, FontId, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InteractiveElement, IntoElement, IsZero, KeybindingKeystroke, Length, Modifiers, ModifiersChangedEvent, MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent, PaintQuad, ParentElement, Pixels, PressureStage, ScrollDelta, ScrollHandle, ScrollWheelEvent, ShapedLine, SharedString, Size, StatefulInteractiveElement, Style, Styled, StyledText, TextAlign, TextRun, TextStyleRefinement, WeakEntity, Window, anchored, checkerboard, deferred, div, fill, linear_color_stop, linear_gradient, outline, pattern_slash, point, px, quad, relative, size, solid_background, transparent_black
 };
 use itertools::Itertools;
 use language::{IndentGuideSettings, language_settings::ShowWhitespaceSetting};
@@ -4101,16 +4091,19 @@ impl EditorElement {
             .h((block_height as f32) * line_height)
             // the checkerboard pattern is semi-transparent, so we render a
             // solid background to prevent indent guides peeking through
-            .bg(cx.theme().colors().editor_background)
-            .child(
-                div()
-                    .size_full()
-                    .bg(checkerboard(cx.theme().colors().panel_background, {
-                        let target_size = 16.0;
-                        let scale = window.scale_factor();
-                        Self::checkerboard_size(f32::from(line_height) * scale, target_size * scale)
-                    })),
-            )
+            // .bg(cx.theme().colors().editor_background)
+            .child(div().size_full().bg({
+                let target_size = 16.0;
+                let scale = window.scale_factor();
+                let pattern_size =
+                    Self::checkerboard_size(f32::from(line_height) * scale, target_size * scale);
+                let color = cx.theme().colors().panel_background;
+
+                pattern_slash(color, 2.0, pattern_size)
+            }))
+            // todo! cameron - only padding when 
+            .when(Settings::try_read_global(cx, f), then)
+            .pl_1()
             .into_any()
     }
 
@@ -4365,6 +4358,7 @@ impl EditorElement {
         line_height: Pixels,
         scroll_position: gpui::Point<ScrollOffset>,
         scroll_pixel_position: gpui::Point<ScrollPixelOffset>,
+        editor_margins: &EditorMargins,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -4384,7 +4378,7 @@ impl EditorElement {
             };
 
             if block.style == BlockStyle::FlexClipped {
-                origin += point(gutter_hitbox.size.width, Pixels::ZERO);
+                origin += point(gutter_hitbox.size.width + editor_margins.gutter.margin, Pixels::ZERO);
             }
 
             if !matches!(block.style, BlockStyle::Sticky) {
@@ -7487,6 +7481,11 @@ impl EditorElement {
             if block.overlaps_gutter {
                 block.element.paint(window, cx);
             } else {
+                // let indent_guide_spacing = if matches!(block.style, BlockStyle::FlexClipped) {
+                //     let width = std::cmp::max(settings.active_line_width, settings.line_width);
+                // } else {
+                //     0
+                // };
                 let mut bounds = layout.hitbox.bounds;
                 bounds.origin.x += layout.gutter_hitbox.bounds.size.width;
                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
@@ -10497,6 +10496,7 @@ impl Element for EditorElement {
                             line_height,
                             scroll_position,
                             scroll_pixel_position,
+                            &editor_margins,
                             window,
                             cx,
                         );
