@@ -1,0 +1,15 @@
+# GPUI crate-specific rules
+#
+# This file is non-exhaustive. Check the root .rules for general guidelines.
+
+# Platform callbacks
+
+* Platform callbacks (e.g., `on_keyboard_layout_change`, `on_thermal_state_change`) can fire
+  asynchronously from macOS while `AppCell` is already borrowed. Defer work via
+  `ForegroundExecutor::spawn` rather than borrowing `AppCell` directly in the callback body.
+
+# Windows device-lost rendering
+
+* During Windows GPU device-loss recovery, only call `DirectXRenderer::mark_drawable()` when
+  handling the forced redraw path (`force_render = true`). Calling it on regular paint events can
+  render stale scene batches against a cleared atlas, leading to crashes or corrupted frames.

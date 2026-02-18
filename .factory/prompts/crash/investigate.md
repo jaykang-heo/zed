@@ -43,6 +43,8 @@ Work backwards from the crash site to determine **what sequence of events or dat
 
 Ask yourself: *What user action or sequence of actions could lead to this state?* The crash came from a real user, so there is some natural usage pattern that triggers it.
 
+Also identify whether a naive guard (for example, returning early on missing data) would cause degraded behavior such as corrupted UI, stale state, or dropped functionality. Call this out explicitly so the fix phase can avoid "no crash but broken output" regressions.
+
 ### Step 4: Write a Reproduction Test
 
 Write a minimal test case that:
@@ -52,6 +54,8 @@ Write a minimal test case that:
 3. **Is minimal** — include only what's necessary to trigger the crash. Remove anything that isn't load-bearing.
 4. **Lives in the right place** — add the test to the existing test module of the crate where the bug lives. Follow the existing test patterns in that module.
 5. **Avoid overly verbose comments** - the test should be self-explanatory and concise. More detailed descriptions of the test can go in ANALYSIS.md (see the next section).
+
+If fully automated reproduction is not feasible (hardware/driver/OS-triggered crashes), provide a deterministic manual reproduction protocol with expected before/after outcomes and any observability signals (logs, screenshots, visible artifacts).
 
 When the test fails, its stack trace should share the key application frames from the original crash report. The outermost frames (crash handler, signal handling) will differ since we're in a test environment — that's expected.
 
@@ -80,6 +84,11 @@ Include the exact command to run the test, e.g.:
 ## Suggested Fix
 <Describe the fix approach. Be specific: which function, what check to add,
 what computation to change. If there are multiple options, list them with tradeoffs.>
+
+## Fix Acceptance Criteria
+- No crash in the reproduced scenario
+- No user-visible corruption/degradation introduced by the mitigation
+- Recovery behavior is explicit and testable (automated or manual)
 ```
 
 ## Guidelines
