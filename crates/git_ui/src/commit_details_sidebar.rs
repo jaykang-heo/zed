@@ -13,8 +13,8 @@ use project::git_store::Repository;
 use std::sync::Arc;
 use time::{OffsetDateTime, UtcOffset};
 use ui::{
-    ButtonLike, ButtonStyle, CopyButton, Icon, IconButton, IconName, IconSize, Label, LabelSize, Tooltip,
-    prelude::*,
+    ButtonLike, ButtonStyle, CopyButton, Icon, IconButton, IconName, IconSize, Label, LabelSize,
+    Tooltip, prelude::*,
 };
 
 pub struct CommitDetailsSidebarData {
@@ -220,7 +220,7 @@ impl CommitDetailsSidebar {
                                                         Icon::new(IconName::Person)
                                                             .size(IconSize::Small)
                                                             .color(Color::Muted),
-                                                    )
+                                                    ),
                                             )
                                             .child(
                                                 div()
@@ -236,7 +236,8 @@ impl CommitDetailsSidebar {
                                             ),
                                     )
                                     .child({
-                                        let short_sha: SharedString = full_sha.chars().take(7).collect::<String>().into();
+                                        let short_sha: SharedString =
+                                            full_sha.chars().take(7).collect::<String>().into();
                                         h_flex()
                                             .gap_1()
                                             .child(
@@ -279,9 +280,12 @@ impl CommitDetailsSidebar {
                                                                     .color(Color::Muted),
                                                             )
                                                             .child(
-                                                                Label::new(format!("View on {}", provider_name))
-                                                                    .size(LabelSize::Small)
-                                                                    .color(Color::Muted),
+                                                                Label::new(format!(
+                                                                    "View on {}",
+                                                                    provider_name
+                                                                ))
+                                                                .size(LabelSize::Small)
+                                                                .color(Color::Muted),
                                                             ),
                                                     )
                                                     .on_click(move |_, _, cx| {
@@ -289,7 +293,6 @@ impl CommitDetailsSidebar {
                                                     }),
                                             ),
                                         )
-
                                     }),
                             )
                             .when(!ref_names.is_empty(), |this| {
