@@ -411,6 +411,17 @@ impl GitRepository for FakeGitRepository {
         self.with_state_async(false, |state| Ok(state.worktrees.clone()))
     }
 
+    // ---- Worktree operations (create, remove, rename) ----
+    //
+    // All three follow the same three-step ordering to match real git:
+    //
+    //   1. Validate  — read-only state check via with_git_state(emit=false).
+    //   2. Filesystem — create_dir / remove_dir / rename.
+    //   3. State     — update git state via with_git_state(emit=true).
+    //
+    // This ensures that if the filesystem operation fails (step 2), git state
+    // is never left inconsistent. Do not reorder these steps.
+
     fn create_worktree(
         &self,
         name: String,
@@ -423,7 +434,7 @@ impl GitRepository for FakeGitRepository {
         async move {
             let path = directory.join(&name);
             executor.simulate_random_delay().await;
-            // Check for simulated error before any side effects
+            // Step 1: Validate preconditions (read-only, no event).
             fs.with_git_state(&dot_git_path, false, {
                 let name = name.clone();
                 move |state| {
@@ -436,8 +447,9 @@ impl GitRepository for FakeGitRepository {
                     Ok(())
                 }
             })??;
-            // Create the directory first; if it fails, state is left unchanged.
+            // Step 2: Create the directory. If this fails, state is untouched.
             fs.create_dir(&path).await?;
+            // Step 3: Update state now that the filesystem is consistent.
             fs.with_git_state(&dot_git_path, true, {
                 let path = path.clone();
                 move |state| {
@@ -464,8 +476,8 @@ impl GitRepository for FakeGitRepository {
         let dot_git_path = self.dot_git_path.clone();
         async move {
             executor.simulate_random_delay().await;
-            // Atomically validate and update state
-            fs.with_git_state(&dot_git_path, true, {
+            // Step 1: Validate preconditions (read-only, no event).
+            fs.with_git_state(&dot_git_path, false, {
                 let path = path.clone();
                 move |state| {
                     if !state.worktrees.iter().any(|w| w.path == path) {
@@ -474,12 +486,10 @@ impl GitRepository for FakeGitRepository {
                     if !force && state.dirty_worktrees.contains(&path) {
                         bail!("worktree '{}' contains modified or untracked files, use --force to delete", path.display());
                     }
-                    state.dirty_worktrees.remove(&path);
-                    state.worktrees.retain(|worktree| worktree.path != path);
-                    Ok::<(), anyhow::Error>(())
+                    Ok(())
                 }
             })??;
-            // Remove the directory now that state is updated.
+            // Step 2: Remove the directory. If this fails, state is untouched.
             fs.remove_dir(
                 &path,
                 RemoveOptions {
@@ -488,6 +498,12 @@ impl GitRepository for FakeGitRepository {
                 },
             )
             .await?;
+            // Step 3: Update state now that the filesystem is consistent.
+            fs.with_git_state(&dot_git_path, true, move |state| {
+                state.dirty_worktrees.remove(&path);
+                state.worktrees.retain(|worktree| worktree.path != path);
+                Ok::<(), anyhow::Error>(())
+            })??;
             Ok(())
         }
         .boxed()
@@ -499,23 +515,17 @@ impl GitRepository for FakeGitRepository {
         let dot_git_path = self.dot_git_path.clone();
         async move {
             executor.simulate_random_delay().await;
-            // Atomically validate and update state
-            fs.with_git_state(&dot_git_path, true, {
+            // Step 1: Validate preconditions (read-only, no event).
+            fs.with_git_state(&dot_git_path, false, {
                 let old_path = old_path.clone();
-                let new_path = new_path.clone();
                 move |state| {
-                    let worktree = state.worktrees.iter_mut().find(|w| w.path == old_path);
-                    match worktree {
-                        Some(worktree) => worktree.path = new_path.clone(),
-                        None => bail!("no worktree found at path: {}", old_path.display()),
+                    if !state.worktrees.iter().any(|w| w.path == old_path) {
+                        bail!("no worktree found at path: {}", old_path.display());
                     }
-                    if state.dirty_worktrees.remove(&old_path) {
-                        state.dirty_worktrees.insert(new_path);
-                    }
-                    Ok::<(), anyhow::Error>(())
+                    Ok(())
                 }
             })??;
-            // Move the directory now that state is updated.
+            // Step 2: Move the directory. If this fails, state is untouched.
             fs.rename(
                 &old_path,
                 &new_path,
@@ -526,6 +536,16 @@ impl GitRepository for FakeGitRepository {
                 },
             )
             .await?;
+            // Step 3: Update state now that the filesystem is consistent.
+            fs.with_git_state(&dot_git_path, true, move |state| {
+                if let Some(worktree) = state.worktrees.iter_mut().find(|w| w.path == old_path) {
+                    worktree.path = new_path.clone();
+                }
+                if state.dirty_worktrees.remove(&old_path) {
+                    state.dirty_worktrees.insert(new_path);
+                }
+                Ok::<(), anyhow::Error>(())
+            })??;
             Ok(())
         }
         .boxed()
