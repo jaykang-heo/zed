@@ -74,6 +74,7 @@ Gemini CLI supports the same workflows as Zed's first-party agent: code generati
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 > Some agent panel features are not yet available with Gemini CLI: editing past
 > messages and checkpointing.
 =======
@@ -81,6 +82,9 @@ Gemini CLI supports the same workflows as Zed's first-party agent: code generati
 >>>>>>> Stashed changes
 =======
 > Some agent panel features are not yet available with Gemini CLI: editing past messages and checkpointing.
+>>>>>>> Stashed changes
+=======
+> Some agent panel features are not yet available with Gemini CLI: editing past messages and checkpointing. Thread history (resuming past sessions) depends on Gemini CLI's ACP capabilities.
 >>>>>>> Stashed changes
 =======
 > Some agent panel features are not yet available with Gemini CLI: editing past messages and checkpointing. Thread history (resuming past sessions) depends on Gemini CLI's ACP capabilities.
@@ -150,6 +154,7 @@ However, the SDK doesn't yet expose everything needed to fully support all of th
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 > Some [agent panel](./agent-panel.md) features are not yet available with Claude
 > Agent: editing past messages and checkpointing.
 =======
@@ -157,6 +162,9 @@ However, the SDK doesn't yet expose everything needed to fully support all of th
 >>>>>>> Stashed changes
 =======
 > Some [agent panel](./agent-panel.md) features are not yet available with Claude Agent: editing past messages and checkpointing.
+>>>>>>> Stashed changes
+=======
+> Some [agent panel](./agent-panel.md) features are not yet available with Claude Agent: editing past messages and checkpointing. Thread history is available—you can resume past sessions from the history sidebar.
 >>>>>>> Stashed changes
 =======
 > Some [agent panel](./agent-panel.md) features are not yet available with Claude Agent: editing past messages and checkpointing. Thread history is available—you can resume past sessions from the history sidebar.
@@ -220,6 +228,7 @@ Codex supports the same workflows as Zed's first-party agent. Add context by @-m
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 > Some agent panel features are not yet available with Codex: editing past
 > messages and checkpointing.
 =======
@@ -227,6 +236,9 @@ Codex supports the same workflows as Zed's first-party agent. Add context by @-m
 >>>>>>> Stashed changes
 =======
 > Some agent panel features are not yet available with Codex: editing past messages and checkpointing.
+>>>>>>> Stashed changes
+=======
+> Some agent panel features are not yet available with Codex: editing past messages and checkpointing. Thread history is available—you can resume past sessions from the history sidebar.
 >>>>>>> Stashed changes
 =======
 > Some agent panel features are not yet available with Codex: editing past messages and checkpointing. Thread history is available—you can resume past sessions from the history sidebar.
