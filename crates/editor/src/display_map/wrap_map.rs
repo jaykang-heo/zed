@@ -212,7 +212,7 @@ impl WrapMap {
             });
 
             match cx
-                .background_executor()
+                .foreground_executor()
                 .block_with_timeout(Duration::from_millis(5), task)
             {
                 Ok((snapshot, edits)) => {
@@ -292,7 +292,7 @@ impl WrapMap {
             });
 
             match cx
-                .background_executor()
+                .foreground_executor()
                 .block_with_timeout(Duration::from_millis(1), update_task)
             {
                 Ok((snapshot, output_edits)) => {
@@ -1079,14 +1079,17 @@ impl<'a> Iterator for WrapChunks<'a> {
         let mask = 1u128.unbounded_shl(input_len as u32).wrapping_sub(1);
         let chars = self.input_chunk.chars & mask;
         let tabs = self.input_chunk.tabs & mask;
+        let newlines = self.input_chunk.newlines & mask;
         self.input_chunk.tabs = self.input_chunk.tabs.unbounded_shr(input_len as u32);
         self.input_chunk.chars = self.input_chunk.chars.unbounded_shr(input_len as u32);
+        self.input_chunk.newlines = self.input_chunk.newlines.unbounded_shr(input_len as u32);
 
         self.input_chunk.text = suffix;
         Some(Chunk {
             text: prefix,
             chars,
             tabs,
+            newlines,
             ..self.input_chunk.clone()
         })
     }
@@ -1119,7 +1122,6 @@ impl Iterator for WrapRows<'_> {
             RowInfo {
                 buffer_id: None,
                 buffer_row: None,
-                base_text_row: None,
                 multibuffer_row: None,
                 diff_status,
                 expand_info: None,

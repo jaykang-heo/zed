@@ -48,9 +48,9 @@ impl Vim {
         self.update_editor(cx, |vim, editor, cx| {
             editor.set_clip_at_line_ends(false, cx);
             editor.transact(window, cx, |editor, window, cx| {
-                let text_layout_details = editor.text_layout_details(window);
+                let text_layout_details = editor.text_layout_details(window, cx);
                 editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
-                    s.move_with(|map, selection| {
+                    s.move_with(&mut |map, selection| {
                         if selection.start == selection.end {
                             Motion::Right.expand_selection(
                                 map,

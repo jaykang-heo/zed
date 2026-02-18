@@ -45,6 +45,7 @@ pub struct WindowsWindowState {
     pub fullscreen_restore_bounds: Cell<Bounds<Pixels>>,
     pub border_offset: WindowBorderOffset,
     pub appearance: Cell<WindowAppearance>,
+    pub background_appearance: Cell<WindowBackgroundAppearance>,
     pub scale_factor: Cell<f32>,
     pub restore_from_minimized: Cell<Option<Box<dyn FnMut(RequestFrameOptions)>>>,
 
@@ -79,9 +80,8 @@ pub(crate) struct WindowsWindowInner {
     pub(crate) hide_title_bar: bool,
     pub(crate) is_movable: bool,
     pub(crate) executor: ForegroundExecutor,
-    pub(crate) windows_version: WindowsVersion,
     pub(crate) validation_number: usize,
-    pub(crate) main_receiver: flume::Receiver<RunnableVariant>,
+    pub(crate) main_receiver: PriorityQueueReceiver<RunnableVariant>,
     pub(crate) platform_window_handle: HWND,
     pub(crate) parent_hwnd: Option<HWND>,
 }
@@ -135,6 +135,7 @@ impl WindowsWindowState {
             fullscreen_restore_bounds: Cell::new(fullscreen_restore_bounds),
             border_offset,
             appearance: Cell::new(appearance),
+            background_appearance: Cell::new(WindowBackgroundAppearance::Opaque),
             scale_factor: Cell::new(scale_factor),
             restore_from_minimized: Cell::new(restore_from_minimized),
             min_size,
@@ -237,11 +238,10 @@ impl WindowsWindowInner {
             hide_title_bar: context.hide_title_bar,
             is_movable: context.is_movable,
             executor: context.executor.clone(),
-            windows_version: context.windows_version,
             validation_number: context.validation_number,
             main_receiver: context.main_receiver.clone(),
             platform_window_handle: context.platform_window_handle,
-            system_settings: WindowsSystemSettings::new(context.display),
+            system_settings: WindowsSystemSettings::new(),
             parent_hwnd: context.parent_hwnd,
         }))
     }
@@ -291,6 +291,7 @@ impl WindowsWindowInner {
                         }
                     }
                 };
+                set_non_rude_hwnd(this.hwnd, !this.state.is_fullscreen());
                 unsafe { set_window_long(this.hwnd, GWL_STYLE, style.0 as isize) };
                 unsafe {
                     SetWindowPos(
@@ -361,10 +362,9 @@ struct WindowCreateContext {
     min_size: Option<Size<Pixels>>,
     executor: ForegroundExecutor,
     current_cursor: Option<HCURSOR>,
-    windows_version: WindowsVersion,
     drop_target_helper: IDropTargetHelper,
     validation_number: usize,
-    main_receiver: flume::Receiver<RunnableVariant>,
+    main_receiver: PriorityQueueReceiver<RunnableVariant>,
     platform_window_handle: HWND,
     appearance: WindowAppearance,
     disable_direct_composition: bool,
@@ -383,7 +383,6 @@ impl WindowsWindow {
             icon,
             executor,
             current_cursor,
-            windows_version,
             drop_target_helper,
             validation_number,
             main_receiver,
@@ -463,7 +462,6 @@ impl WindowsWindow {
             min_size: params.window_min_size,
             executor,
             current_cursor,
-            windows_version,
             drop_target_helper,
             validation_number,
             main_receiver,
@@ -498,6 +496,7 @@ impl WindowsWindow {
         let this = this.unwrap();
 
         register_drag_drop(&this)?;
+        set_non_rude_hwnd(hwnd, true);
         configure_dwm_dark_mode(hwnd, appearance);
         this.state.border_offset.update(hwnd)?;
         let placement = retrieve_window_placement(
@@ -740,8 +739,8 @@ impl PlatformWindow for WindowsWindow {
                         ShowWindowAsync(hwnd, SW_RESTORE).ok().log_err();
                     }
 
-                    SetActiveWindow(hwnd).log_err();
-                    SetFocus(Some(hwnd)).log_err();
+                    SetActiveWindow(hwnd).ok();
+                    SetFocus(Some(hwnd)).ok();
                 }
 
                 // premium ragebait by windows, this is needed because the window
@@ -788,6 +787,14 @@ impl PlatformWindow for WindowsWindow {
         self.state.hovered.get()
     }
 
+    fn background_appearance(&self) -> WindowBackgroundAppearance {
+        self.state.background_appearance.get()
+    }
+
+    fn is_subpixel_rendering_supported(&self) -> bool {
+        true
+    }
+
     fn set_title(&mut self, title: &str) {
         unsafe { SetWindowTextW(self.0.hwnd, &HSTRING::from(title)) }
             .inspect_err(|e| log::error!("Set title failed: {e}"))
@@ -795,6 +802,7 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
+        self.state.background_appearance.set(background_appearance);
         let hwnd = self.0.hwnd;
 
         // using Dwm APIs for Mica and MicaAlt backdrops.
@@ -905,7 +913,11 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn draw(&self, scene: &Scene) {
-        self.state.renderer.borrow_mut().draw(scene).log_err();
+        self.state
+            .renderer
+            .borrow_mut()
+            .draw(scene, self.state.background_appearance.get())
+            .log_err();
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
@@ -920,8 +932,15 @@ impl PlatformWindow for WindowsWindow {
         self.state.renderer.borrow().gpu_specs().log_err()
     }
 
-    fn update_ime_position(&self, _bounds: Bounds<Pixels>) {
-        // There is no such thing on Windows.
+    fn update_ime_position(&self, bounds: Bounds<Pixels>) {
+        let scale_factor = self.state.scale_factor.get();
+        let caret_position = POINT {
+            x: (bounds.origin.x.0 * scale_factor) as i32,
+            y: (bounds.origin.y.0 * scale_factor) as i32
+                + ((bounds.size.height.0 * scale_factor) as i32 / 2),
+        };
+
+        self.0.update_ime_position(self.0.hwnd, caret_position);
     }
 }
 
@@ -1440,6 +1459,17 @@ fn set_window_composition_attribute(hwnd: HWND, color: Option<Color>, state: u32
             };
             let _ = set_window_composition_attribute(hwnd, &mut data as *mut _ as _);
         }
+    }
+}
+
+// When the platform title bar is hidden, Windows may think that our application is meant to appear 'fullscreen'
+// and will stop the taskbar from appearing on top of our window. Prevent this.
+// https://devblogs.microsoft.com/oldnewthing/20250522-00/?p=111211
+fn set_non_rude_hwnd(hwnd: HWND, non_rude: bool) {
+    if non_rude {
+        unsafe { SetPropW(hwnd, w!("NonRudeHWND"), Some(HANDLE(1 as _))) }.log_err();
+    } else {
+        unsafe { RemovePropW(hwnd, w!("NonRudeHWND")) }.log_err();
     }
 }
 

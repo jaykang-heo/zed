@@ -1,11 +1,12 @@
 use agent_client_protocol as acp;
+use agent_settings::AgentSettings;
 use anyhow::Result;
 use futures::FutureExt as _;
-use gpui::{App, AppContext, Entity, SharedString, Task};
-use language_model::LanguageModelToolSchemaFormat;
+use gpui::{App, Entity, SharedString, Task};
 use project::Project;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use settings::Settings;
 use std::{
     path::{Path, PathBuf},
     rc::Rc,
@@ -14,7 +15,10 @@ use std::{
 };
 use util::markdown::MarkdownInlineCode;
 
-use crate::{AgentTool, ThreadEnvironment, ToolCallEventStream};
+use crate::{
+    AgentTool, ThreadEnvironment, ToolCallEventStream, ToolPermissionDecision,
+    decide_permission_from_settings,
+};
 
 const COMMAND_OUTPUT_LIMIT: u64 = 16 * 1024;
 
@@ -23,18 +27,21 @@ const COMMAND_OUTPUT_LIMIT: u64 = 16 * 1024;
 /// This tool can:
 /// 1. Run a new command in a terminal (RunCmd)
 /// 2. Send input to an already-running process (SendInput)
-/// 3. Wait for a running process and check its status (Wait)
 ///
-/// When a command times out or you use Wait, the process is NOT killed. Instead, you get
+/// When a command times out, the process is NOT killed. Instead, you get
 /// the current terminal output and can decide what to do next:
 /// - Send input to interact with the process (e.g., "q" to quit less, Ctrl+C to interrupt)
-/// - Use Wait to check on it again later
 /// - Make a different tool call or respond with text (this will automatically kill the terminal)
 ///
-/// Make sure you use the `cd` parameter to navigate to one of the root directories of the project.
+/// Make sure you use the `cd` parameter to navigate to one of the root directories of the project. NEVER do it as part of the `command` itself, otherwise it will error.
+///
+/// For potentially long-running commands, prefer specifying `timeout_ms` to bound runtime and prevent indefinite hangs.
+///
+/// The terminal emulator is an interactive pty, so commands may block waiting for user input.
+/// Some commands can be configured not to do this, such as `git --no-pager diff` and similar.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct TerminalToolInput {
-    /// The action to perform: run a command, send input to a running process, or wait on a process.
+    /// The action to perform: run a command or send input to a running process.
     pub action: TerminalAction,
     /// Optional timeout in milliseconds. If the process hasn't exited by then, the tool returns
     /// with the current terminal state. The process is NOT killed - you can send more input or wait again.
@@ -101,22 +108,10 @@ impl AgentTool for TerminalTool {
     type Input = TerminalToolInput;
     type Output = String;
 
-    fn name() -> &'static str {
-        "terminal"
-    }
+    const NAME: &'static str = "terminal";
 
     fn kind() -> acp::ToolKind {
         acp::ToolKind::Execute
-    }
-
-    fn input_schema(format: LanguageModelToolSchemaFormat) -> schemars::Schema {
-        let schema = schemars::schema_for!(TerminalToolInput);
-        eprintln!(
-            "[INTERACTIVE-TERMINAL-DEBUG] Terminal tool schema (format {:?}):\n{}",
-            format,
-            serde_json::to_string_pretty(&schema).unwrap_or_else(|e| format!("Error: {}", e))
-        );
-        schema
     }
 
     fn initial_title(
@@ -157,11 +152,6 @@ impl AgentTool for TerminalTool {
     ) -> Task<Result<Self::Output>> {
         let timeout = input.timeout_ms.map(Duration::from_millis);
 
-        eprintln!(
-            "[INTERACTIVE-TERMINAL-DEBUG] Terminal tool run() called with action: {:?}, timeout: {:?}",
-            input.action, timeout
-        );
-
         match &input.action {
             TerminalAction::RunCmd { command, cd } => {
                 let working_dir = match working_dir_from_cd(cd, &self.project, cx) {
@@ -170,15 +160,33 @@ impl AgentTool for TerminalTool {
                 };
                 let command = command.clone();
 
-                let authorize =
-                    event_stream.authorize(self.initial_title(Ok(input.clone()), cx), cx);
-                cx.spawn(async move |cx| {
-                    authorize.await?;
+                let settings = AgentSettings::get_global(cx);
+                let decision = decide_permission_from_settings(
+                    Self::NAME,
+                    std::slice::from_ref(&command),
+                    settings,
+                );
 
-                    eprintln!(
-                        "[INTERACTIVE-TERMINAL-DEBUG] RunCmd authorized, creating terminal for command: {}",
-                        command
-                    );
+                let authorize = match decision {
+                    ToolPermissionDecision::Allow => None,
+                    ToolPermissionDecision::Deny(reason) => {
+                        return Task::ready(Err(anyhow::anyhow!("{}", reason)));
+                    }
+                    ToolPermissionDecision::Confirm => {
+                        let context =
+                            crate::ToolPermissionContext::new(Self::NAME, vec![command.clone()]);
+                        Some(event_stream.authorize(
+                            self.initial_title(Ok(input.clone()), cx),
+                            context,
+                            cx,
+                        ))
+                    }
+                };
+
+                cx.spawn(async move |cx| {
+                    if let Some(authorize) = authorize {
+                        authorize.await?;
+                    }
 
                     let terminal = self
                         .environment
@@ -191,43 +199,43 @@ impl AgentTool for TerminalTool {
                         .await?;
 
                     let terminal_id = terminal.id(cx)?;
-                    eprintln!(
-                        "[INTERACTIVE-TERMINAL-DEBUG] Terminal created with ID: {:?}",
-                        terminal_id
-                    );
                     event_stream.update_fields(acp::ToolCallUpdateFields::new().content(vec![
                         acp::ToolCallContent::Terminal(acp::Terminal::new(terminal_id.clone())),
                     ]));
 
+                    let mut user_stopped_via_signal = false;
                     let (exited, exit_status) = match timeout {
                         Some(timeout) => {
                             let wait_for_exit = terminal.wait_for_exit(cx)?;
-                            let timeout_task = cx.background_spawn(async move {
-                                smol::Timer::after(timeout).await;
-                            });
-
+                            let timeout_task = cx.background_executor().timer(timeout);
                             futures::select! {
-                                status = wait_for_exit.clone().fuse() => {
-                                    eprintln!(
-                                        "[INTERACTIVE-TERMINAL-DEBUG] RunCmd: process exited with status: {:?}",
-                                        status
-                                    );
-                                    (true, status)
+                                status = wait_for_exit.clone().fuse() => (true, status),
+                                _ = timeout_task.fuse() => (false, acp::TerminalExitStatus::new()),
+                                _ = event_stream.cancelled_by_user().fuse() => {
+                                    user_stopped_via_signal = true;
+                                    terminal.kill(cx)?;
+                                    terminal.wait_for_exit(cx)?.await;
+                                    (true, acp::TerminalExitStatus::new())
                                 },
-                                _ = timeout_task.fuse() => {
-                                    eprintln!(
-                                        "[INTERACTIVE-TERMINAL-DEBUG] RunCmd: timeout reached ({:?}), process still running",
-                                        timeout
-                                    );
-                                    (false, acp::TerminalExitStatus::new())
-                                }
                             }
                         }
                         None => {
-                            let status = terminal.wait_for_exit(cx)?.await;
-                            (true, status)
+                            let wait_for_exit = terminal.wait_for_exit(cx)?;
+                            futures::select! {
+                                status = wait_for_exit.clone().fuse() => (true, status),
+                                _ = event_stream.cancelled_by_user().fuse() => {
+                                    user_stopped_via_signal = true;
+                                    terminal.kill(cx)?;
+                                    wait_for_exit.await;
+                                    (true, acp::TerminalExitStatus::new())
+                                },
+                            }
                         }
                     };
+
+                    let user_stopped = user_stopped_via_signal
+                        || event_stream.was_cancelled_by_user()
+                        || terminal.was_stopped_by_user(cx).unwrap_or(false);
 
                     let output = terminal.current_output(cx)?;
                     let terminal_id_str = terminal_id.0.to_string();
@@ -239,6 +247,7 @@ impl AgentTool for TerminalTool {
                         exited,
                         exit_status,
                         timeout,
+                        user_stopped,
                     ))
                 })
             }
@@ -250,57 +259,26 @@ impl AgentTool for TerminalTool {
                     MarkdownInlineCode(&format!("Send input {:?} to current process", input))
                         .to_string()
                         .into();
-                let authorize = event_stream.authorize(title, cx);
+                let context = crate::ToolPermissionContext::new(Self::NAME, vec![input.clone()]);
+                let authorize = event_stream.authorize(title, context, cx);
 
                 cx.spawn(async move |cx| {
                     authorize.await?;
 
-                    eprintln!(
-                        "[INTERACTIVE-TERMINAL-DEBUG] SendInput authorized, looking up terminal: {:?}",
-                        terminal_id
-                    );
-
                     let terminal = self.environment.get_terminal(&terminal_id, cx)?;
-
-                    eprintln!(
-                        "[INTERACTIVE-TERMINAL-DEBUG] Sending input to terminal: {:?}",
-                        input
-                    );
                     terminal.send_input(&input, cx)?;
-                    eprintln!("[INTERACTIVE-TERMINAL-DEBUG] Input sent successfully");
 
                     let timeout = timeout.unwrap_or(Duration::from_millis(1000));
                     let (exited, exit_status) = {
                         let wait_for_exit = terminal.wait_for_exit(cx)?;
-                        let timeout_task = cx.background_spawn(async move {
-                            smol::Timer::after(timeout).await;
-                        });
-
+                        let timeout_task = cx.background_executor().timer(timeout);
                         futures::select! {
-                            status = wait_for_exit.clone().fuse() => {
-                                eprintln!(
-                                    "[INTERACTIVE-TERMINAL-DEBUG] Terminal exited with status: {:?}",
-                                    status
-                                );
-                                (true, status)
-                            },
-                            _ = timeout_task.fuse() => {
-                                eprintln!(
-                                    "[INTERACTIVE-TERMINAL-DEBUG] Timeout reached ({:?}), terminal still running",
-                                    timeout
-                                );
-                                (false, acp::TerminalExitStatus::new())
-                            }
+                            status = wait_for_exit.clone().fuse() => (true, status),
+                            _ = timeout_task.fuse() => (false, acp::TerminalExitStatus::new()),
                         }
                     };
 
                     let output = terminal.current_output(cx)?;
-                    eprintln!(
-                        "[INTERACTIVE-TERMINAL-DEBUG] Current output length: {}, truncated: {}, exited: {}",
-                        output.output.len(),
-                        output.truncated,
-                        exited
-                    );
                     Ok(process_send_input_result(
                         output,
                         &input,
@@ -321,6 +299,7 @@ fn process_run_cmd_result(
     exited: bool,
     exit_status: acp::TerminalExitStatus,
     timeout: Option<Duration>,
+    user_stopped: bool,
 ) -> String {
     let content = output.output.trim();
     let content_block = if content.is_empty() {
@@ -335,7 +314,20 @@ fn process_run_cmd_result(
         format!("```\n{}\n```", content)
     };
 
-    if exited {
+    if user_stopped {
+        if content_block.is_empty() {
+            "The user stopped this command. No output was captured before stopping.\n\n\
+            Since the user intentionally interrupted this command, ask them what they would like to do next \
+            rather than automatically retrying or assuming something went wrong.".to_string()
+        } else {
+            format!(
+                "The user stopped this command. Output captured before stopping:\n\n{}\n\n\
+                Since the user intentionally interrupted this command, ask them what they would like to do next \
+                rather than automatically retrying or assuming something went wrong.",
+                content_block
+            )
+        }
+    } else if exited {
         match exit_status.exit_code {
             Some(0) => {
                 if content_block.is_empty() {
