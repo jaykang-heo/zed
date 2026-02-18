@@ -119,30 +119,35 @@ impl WorktreeList {
             ));
         }
 
-        cx.spawn_in(window, async move |this, cx| {
-            let all_worktrees = all_worktrees_request
-                .context("No active repository")?
-                .await??;
+        let initial_fetch_task = cx.spawn_in(window, async move |this, cx| {
+            if let Err(error) = async {
+                let all_worktrees = all_worktrees_request
+                    .context("No active repository")?
+                    .await??;
 
-            let default_branch = default_branch_request
-                .context("No active repository")?
-                .await
-                .map(Result::ok)
-                .ok()
-                .flatten()
-                .flatten();
+                let default_branch = default_branch_request
+                    .context("No active repository")?
+                    .await
+                    .map(Result::ok)
+                    .ok()
+                    .flatten()
+                    .flatten();
 
-            this.update_in(cx, |this, window, cx| {
-                this.picker.update(cx, |picker, cx| {
-                    picker.delegate.all_worktrees = Some(all_worktrees);
-                    picker.delegate.default_branch = default_branch;
-                    picker.refresh(window, cx);
-                })
-            })?;
+                this.update_in(cx, |this, window, cx| {
+                    this.picker.update(cx, |picker, cx| {
+                        picker.delegate.all_worktrees = Some(all_worktrees);
+                        picker.delegate.default_branch = default_branch;
+                        picker.refresh(window, cx);
+                    })
+                })?;
 
-            anyhow::Ok(())
-        })
-        .detach_and_log_err(cx);
+                anyhow::Ok(())
+            }
+            .await
+            {
+                log::error!("{error:#}");
+            }
+        });
 
         let delegate = WorktreeListDelegate::new(workspace, repository, window, cx);
         let picker = cx.new(|cx| {
@@ -160,7 +165,7 @@ impl WorktreeList {
             picker_focus_handle,
             width,
             _subscriptions,
-            _worktree_refresh_task: None,
+            _worktree_refresh_task: Some(initial_fetch_task),
             embedded,
         }
     }

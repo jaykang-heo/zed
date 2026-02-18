@@ -533,7 +533,7 @@ impl GitRepository for FakeGitRepository {
                     .worktrees
                     .iter_mut()
                     .find(|w| w.path == old_path)
-                    .expect("worktree was validated above");
+                    .context("worktree disappeared between validation and state update")?;
                 worktree.path = new_path.clone();
                 if state.dirty_worktrees.remove(&old_path) {
                     state.dirty_worktrees.insert(new_path);

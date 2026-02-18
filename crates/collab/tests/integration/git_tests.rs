@@ -242,6 +242,15 @@ async fn test_repository_remove_worktree_remote_roundtrip(
     .unwrap();
     executor.run_until_parked();
 
+    // Verify the directory was removed from the filesystem.
+    assert!(
+        !client_a
+            .fs()
+            .is_dir(Path::new("/worktrees/test-branch"))
+            .await,
+        "worktree directory should be removed from filesystem"
+    );
+
     // Verify the worktree was removed on the host.
     client_a
         .fs()
@@ -315,6 +324,22 @@ async fn test_repository_rename_worktree_remote_roundtrip(
     .unwrap()
     .unwrap();
     executor.run_until_parked();
+
+    // Verify the filesystem reflects the rename.
+    assert!(
+        !client_a
+            .fs()
+            .is_dir(Path::new("/worktrees/old-branch"))
+            .await,
+        "old worktree directory should no longer exist"
+    );
+    assert!(
+        client_a
+            .fs()
+            .is_dir(Path::new("/worktrees/new-branch"))
+            .await,
+        "new worktree directory should exist"
+    );
 
     // Verify the worktree was renamed on the host.
     client_a
@@ -460,6 +485,12 @@ async fn test_repository_worktree_ops_local(
     .unwrap();
     executor.run_until_parked();
 
+    // Verify the directory was removed from the filesystem.
+    assert!(
+        !client.fs().is_dir(Path::new("/worktrees/remove-me")).await,
+        "worktree directory should be removed from filesystem"
+    );
+
     // Verify removal.
     let worktrees = cx_a
         .update(|cx| repo.update(cx, |repo, _| repo.worktrees()))
@@ -521,6 +552,16 @@ async fn test_repository_worktree_ops_local(
     .unwrap()
     .unwrap();
     executor.run_until_parked();
+
+    // Verify the filesystem reflects the rename.
+    assert!(
+        !client.fs().is_dir(Path::new("/worktrees/old-name")).await,
+        "old worktree directory should no longer exist"
+    );
+    assert!(
+        client.fs().is_dir(Path::new("/worktrees/new-name")).await,
+        "new worktree directory should exist"
+    );
 
     // Verify rename.
     let worktrees = cx_a
@@ -668,6 +709,15 @@ async fn test_repository_remove_dirty_worktree(
     .unwrap()
     .unwrap();
     executor.run_until_parked();
+
+    // Verify the directory was removed from the filesystem.
+    assert!(
+        !client_a
+            .fs()
+            .is_dir(Path::new("/worktrees/dirty-branch"))
+            .await,
+        "worktree directory should be removed from filesystem after force removal"
+    );
 
     // Verify the worktree was removed.
     let worktrees = cx_b

@@ -2289,7 +2289,12 @@ impl GitStore {
         let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
         let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
         let directory = PathBuf::from(envelope.payload.directory);
+        anyhow::ensure!(
+            !directory.as_os_str().is_empty(),
+            "worktree directory path must not be empty"
+        );
         let name = envelope.payload.name;
+        anyhow::ensure!(!name.is_empty(), "worktree name must not be empty");
         let commit = envelope.payload.commit;
 
         repository_handle
@@ -2309,6 +2314,10 @@ impl GitStore {
         let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
         let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
         let path = PathBuf::from(envelope.payload.path);
+        anyhow::ensure!(
+            !path.as_os_str().is_empty(),
+            "worktree path must not be empty"
+        );
         let force = envelope.payload.force;
 
         repository_handle
@@ -2328,7 +2337,15 @@ impl GitStore {
         let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
         let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
         let old_path = PathBuf::from(envelope.payload.old_path);
+        anyhow::ensure!(
+            !old_path.as_os_str().is_empty(),
+            "worktree old_path must not be empty"
+        );
         let new_path = PathBuf::from(envelope.payload.new_path);
+        anyhow::ensure!(
+            !new_path.as_os_str().is_empty(),
+            "worktree new_path must not be empty"
+        );
 
         repository_handle
             .update(&mut cx, |repository_handle, cx| {
@@ -5582,36 +5599,22 @@ impl Repository {
         self.send_job(
             Some("git worktree add".into()),
             move |repo, mut cx| async move {
-                match repo {
+                let result = match repo {
                     RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                        let result = backend.create_worktree(name, path, commit).await;
-                        if result.is_ok() {
-                            this.update(&mut cx, |_this, cx| {
-                                cx.emit(RepositoryEvent::WorktreesChanged);
-                            })
-                            .log_err();
-                        }
-                        result
+                        backend.create_worktree(name, path, commit).await
                     }
-                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
-                        client
-                            .request(proto::GitCreateWorktree {
-                                project_id: project_id.0,
-                                repository_id: id.to_proto(),
-                                name,
-                                directory: path.to_string_lossy().to_string(),
-                                commit,
-                            })
-                            .await?;
-
-                        this.update(&mut cx, |_this, cx| {
-                            cx.emit(RepositoryEvent::WorktreesChanged);
+                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => client
+                        .request(proto::GitCreateWorktree {
+                            project_id: project_id.0,
+                            repository_id: id.to_proto(),
+                            name,
+                            directory: path.to_string_lossy().to_string(),
+                            commit,
                         })
-                        .log_err();
-
-                        Ok(())
-                    }
-                }
+                        .await
+                        .map(|_| ()),
+                };
+                emit_worktrees_changed(&this, &mut cx, result)
             },
         )
     }
@@ -5627,37 +5630,21 @@ impl Repository {
         self.send_job(
             Some("git worktree remove".into()),
             move |repo, mut cx| async move {
-                match repo {
+                let result = match repo {
                     RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                        // TODO would be nice to not have to do this manually
-                        let result = backend.remove_worktree(path, force).await;
-                        if result.is_ok() {
-                            this.update(&mut cx, |_this, cx| {
-                                cx.emit(RepositoryEvent::WorktreesChanged);
-                            })
-                            .log_err();
-                        }
-                        result
+                        backend.remove_worktree(path, force).await
                     }
-                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
-                        client
-                            .request(proto::GitRemoveWorktree {
-                                project_id: project_id.0,
-                                repository_id: id.to_proto(),
-                                path: path.to_string_lossy().to_string(),
-                                force,
-                            })
-                            .await?;
-
-                        // TODO would be nice to not have to do this manually
-                        this.update(&mut cx, |_this, cx| {
-                            cx.emit(RepositoryEvent::WorktreesChanged);
+                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => client
+                        .request(proto::GitRemoveWorktree {
+                            project_id: project_id.0,
+                            repository_id: id.to_proto(),
+                            path: path.to_string_lossy().to_string(),
+                            force,
                         })
-                        .log_err();
-
-                        Ok(())
-                    }
-                }
+                        .await
+                        .map(|_| ()),
+                };
+                emit_worktrees_changed(&this, &mut cx, result)
             },
         )
     }
@@ -5673,41 +5660,41 @@ impl Repository {
         self.send_job(
             Some("git worktree move".into()),
             move |repo, mut cx| async move {
-                match repo {
+                let result = match repo {
                     RepositoryState::Local(LocalRepositoryState { backend, .. }) => {
-                        // TODO would be nice to not have to do this manually
-                        let result = backend.rename_worktree(old_path, new_path).await;
-                        if result.is_ok() {
-                            this.update(&mut cx, |_this, cx| {
-                                cx.emit(RepositoryEvent::WorktreesChanged);
-                            })
-                            .log_err();
-                        }
-                        result
+                        backend.rename_worktree(old_path, new_path).await
                     }
-                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => {
-                        client
-                            .request(proto::GitRenameWorktree {
-                                project_id: project_id.0,
-                                repository_id: id.to_proto(),
-                                old_path: old_path.to_string_lossy().to_string(),
-                                new_path: new_path.to_string_lossy().to_string(),
-                            })
-                            .await?;
-
-                        // TODO would be nice to not have to do this manually
-                        this.update(&mut cx, |_this, cx| {
-                            cx.emit(RepositoryEvent::WorktreesChanged);
+                    RepositoryState::Remote(RemoteRepositoryState { project_id, client }) => client
+                        .request(proto::GitRenameWorktree {
+                            project_id: project_id.0,
+                            repository_id: id.to_proto(),
+                            old_path: old_path.to_string_lossy().to_string(),
+                            new_path: new_path.to_string_lossy().to_string(),
                         })
-                        .log_err();
-
-                        Ok(())
-                    }
-                }
+                        .await
+                        .map(|_| ()),
+                };
+                emit_worktrees_changed(&this, &mut cx, result)
             },
         )
     }
+}
 
+fn emit_worktrees_changed(
+    this: &WeakEntity<Repository>,
+    cx: &mut AsyncApp,
+    result: Result<()>,
+) -> Result<()> {
+    if result.is_ok() {
+        this.update(cx, |_this, cx| {
+            cx.emit(RepositoryEvent::WorktreesChanged);
+        })
+        .log_err();
+    }
+    result
+}
+
+impl Repository {
     pub fn default_branch(
         &mut self,
         include_remote_name: bool,
