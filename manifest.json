@@ -25,6 +25,36 @@
       "date": "2026-02-11T06:28:55Z"
     },
     {
+      "pr": 48930,
+      "title": "Fix terminal pane showing welcome screen during loading",
+      "file": "suggestions/PR-48930.md",
+      "date": "2026-02-11T11:46:51Z"
+    },
+    {
+      "pr": 44794,
+      "title": "languages: Fix local path of JSON and YAML schemas",
+      "file": "suggestions/PR-44794.md",
+      "date": "2026-02-12T04:50:54Z"
+    },
+    {
+      "pr": 48763,
+      "title": "repl: List python environments first",
+      "file": "suggestions/PR-48763.md",
+      "date": "2026-02-12T07:20:20Z"
+    },
+    {
+      "pr": 45073,
+      "title": "cli: Use Terminal Panels window for zed --add",
+      "file": "suggestions/PR-45073.md",
+      "date": "2026-02-12T10:55:56Z"
+    },
+    {
+      "pr": 48495,
+      "title": "python: Fix windows backslash path handling in python toolchain detection",
+      "file": "suggestions/PR-48495.md",
+      "date": "2026-02-12T11:00:23Z"
+    },
+    {
       "pr": 49374,
       "title": "Enable type on search by default for the project search",
       "file": "suggestions/PR-49374.md",
