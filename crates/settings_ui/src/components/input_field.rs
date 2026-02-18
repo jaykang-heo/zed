@@ -6,6 +6,19 @@ use settings::Settings as _;
 use theme::ThemeSettings;
 use ui::{Tooltip, prelude::*, rems};
 
+/// Tracks state for the confirm-on-blur feature across renders.
+/// Stored in keyed element state so it persists across consecutive frames.
+struct BlurConfirmState {
+    /// The `initial_text` value we saw on the previous render.
+    /// Used to detect when settings change externally vs user edits.
+    previous_initial_text: Option<String>,
+    /// When we fire a deferred confirm-on-blur save, we record the
+    /// text that was saved here. While this is `Some`, we suppress
+    /// reconciliation so it doesn't revert the user's edit before
+    /// the async settings write propagates back to `initial_text`.
+    saved_text: Option<String>,
+}
+
 #[derive(IntoElement)]
 pub struct SettingsInputField {
     id: Option<ElementId>,
@@ -116,6 +129,8 @@ impl RenderOnce for SettingsInputField {
             ..Default::default()
         };
 
+        let saved_id = self.id.clone();
+
         let editor = if let Some(id) = self.id {
             window.use_keyed_state(id, cx, {
                 let initial_text = self.initial_text.clone();
@@ -152,23 +167,103 @@ impl RenderOnce for SettingsInputField {
             })
         };
 
+        // --- Reconciliation + confirm-on-blur ---
+        //
         // When settings change externally (e.g. editing settings.json), the page
         // re-renders but use_keyed_state returns the cached editor with stale text.
-        // Reconcile with the expected initial_text when the editor is not focused,
-        // so we don't clobber what the user is actively typing.
+        // We reconcile when the editor is not focused so we don't clobber what the
+        // user is actively typing.
+        //
+        // When confirm_on_blur is enabled we additionally need to distinguish two
+        // cases that both look like "current_text != initial_text && !focused":
+        //   A) The user edited the field and then blurred → we should *save*.
+        //   B) Settings changed externally → we should *reset* the editor.
+        //
+        // We tell them apart by tracking the previous render's initial_text in
+        // keyed element state: if initial_text changed since last render it's an
+        // external update (case B); otherwise the user must have edited (case A).
         if let Some(initial_text) = &self.initial_text {
             let current_text = editor.read(cx).text(cx);
-            if current_text != *initial_text && !editor.read(cx).is_focused(window) {
-                if let Some(confirm) = self.confirm_on_blur.then(|| self.confirm.clone()).flatten()
-                {
-                    let text = current_text;
-                    window.defer(cx, move |window, cx| {
-                        let value = (!text.is_empty()).then_some(text);
-                        confirm(value, window, cx);
+            let is_focused = editor.read(cx).is_focused(window);
+
+            // Obtain (or skip) blur-confirm state for keyed editors.
+            let blur_state = if self.confirm_on_blur {
+                saved_id.as_ref().map(|id| {
+                    let state_id = ElementId::Name(format!("{}-blur-state", id).into());
+                    window.use_keyed_state(state_id, cx, |_, _| BlurConfirmState {
+                        previous_initial_text: None,
+                        saved_text: None,
+                    })
+                })
+            } else {
+                None
+            };
+
+            // Detect whether initial_text changed since last render.
+            let initial_text_changed = if let Some(ref state) = blur_state {
+                let changed = state.read(cx).previous_initial_text.as_ref() != Some(initial_text);
+                if changed {
+                    state.update(cx, |state, _cx| {
+                        state.previous_initial_text = Some(initial_text.clone());
+                        state.saved_text = None;
                     });
-                } else {
+                }
+                changed
+            } else {
+                false
+            };
+
+            if current_text != *initial_text && !is_focused {
+                if initial_text_changed {
+                    // Case B: settings changed (either our save propagated or an
+                    // external edit). Always sync the editor to the new value.
                     editor.update(cx, |editor, cx| {
                         editor.set_text(initial_text.clone(), window, cx);
+                    });
+                } else if let Some(ref state) = blur_state {
+                    let already_saved = state.read(cx).saved_text.as_ref() == Some(&current_text);
+                    if already_saved {
+                        // We already fired a save for this exact text and are
+                        // waiting for the async settings write to propagate.
+                        // Don't reset the editor — it will reconcile once
+                        // initial_text catches up.
+                    } else if let Some(confirm) = self.confirm.clone() {
+                        // Case A: user edited and blurred. Fire a deferred save
+                        // and remember what we saved so we can suppress
+                        // reconciliation until the settings file catches up.
+                        state.update(cx, |state, _cx| {
+                            state.saved_text = Some(current_text.clone());
+                        });
+                        let text = current_text;
+                        window.defer(cx, move |window, cx| {
+                            let value = (!text.is_empty()).then_some(text);
+                            confirm(value, window, cx);
+                        });
+                    } else {
+                        // confirm_on_blur set but no confirm callback — fall
+                        // through to normal reset.
+                        editor.update(cx, |editor, cx| {
+                            editor.set_text(initial_text.clone(), window, cx);
+                        });
+                    }
+                } else {
+                    // Normal reconciliation (no confirm_on_blur).
+                    editor.update(cx, |editor, cx| {
+                        editor.set_text(initial_text.clone(), window, cx);
+                    });
+                }
+            } else if let Some(ref state) = blur_state {
+                // Texts match (or editor is focused). If we had a pending save
+                // and initial_text now matches, the save propagated — clean up.
+                if state.read(cx).saved_text.is_some() {
+                    state.update(cx, |state, _cx| {
+                        state.saved_text = None;
+                    });
+                }
+                // Keep previous_initial_text in sync even when texts match.
+                if state.read(cx).previous_initial_text.as_ref() != Some(initial_text) {
+                    state.update(cx, |state, _cx| {
+                        state.previous_initial_text = Some(initial_text.clone());
                     });
                 }
             }
