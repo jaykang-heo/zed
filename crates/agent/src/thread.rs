@@ -889,6 +889,8 @@ pub struct Thread {
     imported: bool,
     /// If this is a subagent thread, contains context about the parent
     subagent_context: Option<SubagentContext>,
+    /// The user's unsent prompt text, persisted so it can be restored when reloading the thread.
+    draft_prompt: Option<String>,
     /// Weak references to running subagent threads for cancellation propagation
     running_subagents: Vec<WeakEntity<Thread>>,
     /// Git worktree info if this thread is running in an agent worktree.
@@ -982,6 +984,7 @@ impl Thread {
             file_read_times: HashMap::default(),
             imported: false,
             subagent_context: None,
+            draft_prompt: None,
             running_subagents: Vec::new(),
             git_worktree_info: None,
         }
@@ -1207,6 +1210,7 @@ impl Thread {
             file_read_times: HashMap::default(),
             imported: db_thread.imported,
             subagent_context: db_thread.subagent_context,
+            draft_prompt: db_thread.draft_prompt,
             running_subagents: Vec::new(),
             git_worktree_info: db_thread.git_worktree_info,
         }
@@ -1230,6 +1234,7 @@ impl Thread {
             imported: self.imported,
             subagent_context: self.subagent_context.clone(),
             git_worktree_info: self.git_worktree_info.clone(),
+            draft_prompt: self.draft_prompt.clone(),
         };
 
         cx.background_spawn(async move {
@@ -1269,6 +1274,14 @@ impl Thread {
 
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty() && self.title.is_none()
+    }
+
+    pub fn draft_prompt(&self) -> Option<&str> {
+        self.draft_prompt.as_deref()
+    }
+
+    pub fn set_draft_prompt(&mut self, prompt: Option<String>) {
+        self.draft_prompt = prompt;
     }
 
     pub fn model(&self) -> Option<&Arc<dyn LanguageModel>> {

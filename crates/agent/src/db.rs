@@ -70,6 +70,8 @@ pub struct DbThread {
     pub subagent_context: Option<crate::SubagentContext>,
     #[serde(default)]
     pub git_worktree_info: Option<AgentGitWorktreeInfo>,
+    #[serde(default)]
+    pub draft_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +111,7 @@ impl SharedThread {
             imported: true,
             subagent_context: None,
             git_worktree_info: None,
+            draft_prompt: None,
         }
     }
 
@@ -284,6 +287,7 @@ impl DbThread {
             imported: false,
             subagent_context: None,
             git_worktree_info: None,
+            draft_prompt: None,
         })
     }
 }
@@ -610,6 +614,7 @@ mod tests {
             imported: false,
             subagent_context: None,
             git_worktree_info: None,
+            draft_prompt: None,
         }
     }
 

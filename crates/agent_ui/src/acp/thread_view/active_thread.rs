@@ -240,6 +240,7 @@ pub struct AcpThreadView {
     pub selected_permission_granularity: HashMap<agent_client_protocol::ToolCallId, usize>,
     pub resume_thread_metadata: Option<AgentSessionInfo>,
     pub _cancel_task: Option<Task<()>>,
+    _draft_save_task: Option<Task<()>>,
     pub skip_queue_processing_count: usize,
     pub user_interrupted_generation: bool,
     pub can_fast_track_queue: bool,
@@ -346,6 +347,14 @@ impl AcpThreadView {
                         editor.set_message(blocks, window, cx);
                     }
                 }
+            } else if let Some(draft) = thread.read(cx).draft_prompt() {
+                editor.set_message(
+                    vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        draft.to_string(),
+                    ))],
+                    window,
+                    cx,
+                );
             }
             editor
         });
@@ -377,6 +386,25 @@ impl AcpThreadView {
             window,
             Self::handle_message_editor_event,
         ));
+
+        subscriptions.push(cx.observe(&message_editor, |this, editor, cx| {
+            let text = editor.read(cx).text(cx);
+            let draft = if text.is_empty() { None } else { Some(text) };
+            this.thread.update(cx, |thread, _cx| {
+                thread.set_draft_prompt(draft);
+            });
+            this._draft_save_task = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                this.update(cx, |this, cx| {
+                    if let Some(thread) = this.as_native_thread(cx) {
+                        thread.update(cx, |_thread, cx| cx.notify());
+                    }
+                })
+                .ok();
+            }));
+        }));
 
         let recent_history_entries = history.read(cx).get_recent_sessions(3);
 
@@ -430,6 +458,7 @@ impl AcpThreadView {
             new_server_version_available: None,
             selected_permission_granularity: HashMap::default(),
             _cancel_task: None,
+            _draft_save_task: None,
             skip_queue_processing_count: 0,
             user_interrupted_generation: false,
             can_fast_track_queue: false,
