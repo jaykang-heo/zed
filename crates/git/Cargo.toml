@@ -45,6 +45,7 @@ futures.workspace = true
 ztracing.workspace = true
 
 [dev-dependencies]
+dunce = "1.0"
 pretty_assertions.workspace = true
 serde_json.workspace = true
 text = { workspace = true, features = ["test-support"] }

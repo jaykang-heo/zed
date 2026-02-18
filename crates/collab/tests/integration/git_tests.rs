@@ -205,19 +205,20 @@ async fn test_repository_remove_worktree_remote_roundtrip(
     // Create the directory first since remove_worktree does filesystem operations.
     client_a
         .fs()
-        .create_dir(Path::new("/worktrees/test-branch"))
+        .create_dir(Path::new(path!("/worktrees/test-branch")))
         .await
         .unwrap();
     client_a
         .fs()
         .with_git_state(Path::new(path!("/project/.git")), false, |state| {
             state.worktrees.push(git::repository::Worktree {
-                path: PathBuf::from("/worktrees/test-branch"),
+                path: PathBuf::from(path!("/worktrees/test-branch")),
                 ref_name: "refs/heads/test-branch".into(),
                 sha: "abc123".into(),
             });
         })
         .unwrap();
+    executor.run_until_parked();
 
     // Verify the worktree exists before removing it.
     let worktrees = cx_b
@@ -243,7 +244,7 @@ async fn test_repository_remove_worktree_remote_roundtrip(
     // Remove the worktree via the remote RPC path.
     cx_b.update(|cx| {
         repo_b.update(cx, |repo, cx| {
-            repo.remove_worktree(PathBuf::from("/worktrees/test-branch"), false, cx)
+            repo.remove_worktree(PathBuf::from(path!("/worktrees/test-branch")), false, cx)
         })
     })
     .await
@@ -264,7 +265,7 @@ async fn test_repository_remove_worktree_remote_roundtrip(
     assert!(
         !client_a
             .fs()
-            .is_dir(Path::new("/worktrees/test-branch"))
+            .is_dir(Path::new(path!("/worktrees/test-branch")))
             .await,
         "worktree directory should be removed from filesystem"
     );
@@ -306,19 +307,20 @@ async fn test_repository_rename_worktree_remote_roundtrip(
     // Create the directory first since rename_worktree does filesystem operations.
     client_a
         .fs()
-        .create_dir(Path::new("/worktrees/old-branch"))
+        .create_dir(Path::new(path!("/worktrees/old-branch")))
         .await
         .unwrap();
     client_a
         .fs()
         .with_git_state(Path::new(path!("/project/.git")), false, |state| {
             state.worktrees.push(git::repository::Worktree {
-                path: PathBuf::from("/worktrees/old-branch"),
+                path: PathBuf::from(path!("/worktrees/old-branch")),
                 ref_name: "refs/heads/old-branch".into(),
                 sha: "abc123".into(),
             });
         })
         .unwrap();
+    executor.run_until_parked();
 
     // Verify the worktree exists before renaming it.
     let worktrees = cx_b
@@ -341,8 +343,8 @@ async fn test_repository_rename_worktree_remote_roundtrip(
     cx_b.update(|cx| {
         repo_b.update(cx, |repo, cx| {
             repo.rename_worktree(
-                PathBuf::from("/worktrees/old-branch"),
-                PathBuf::from("/worktrees/new-branch"),
+                PathBuf::from(path!("/worktrees/old-branch")),
+                PathBuf::from(path!("/worktrees/new-branch")),
                 cx,
             )
         })
@@ -365,14 +367,14 @@ async fn test_repository_rename_worktree_remote_roundtrip(
     assert!(
         !client_a
             .fs()
-            .is_dir(Path::new("/worktrees/old-branch"))
+            .is_dir(Path::new(path!("/worktrees/old-branch")))
             .await,
         "old worktree directory should no longer exist"
     );
     assert!(
         client_a
             .fs()
-            .is_dir(Path::new("/worktrees/new-branch"))
+            .is_dir(Path::new(path!("/worktrees/new-branch")))
             .await,
         "new worktree directory should exist"
     );
@@ -388,7 +390,7 @@ async fn test_repository_rename_worktree_remote_roundtrip(
                     .first()
                     .expect("should have one worktree")
                     .path,
-                PathBuf::from("/worktrees/new-branch"),
+                PathBuf::from(path!("/worktrees/new-branch")),
                 "worktree path should be renamed on host"
             );
         })
@@ -407,7 +409,7 @@ async fn test_repository_rename_worktree_remote_roundtrip(
     );
     assert_eq!(
         remote_worktrees[0].path,
-        PathBuf::from("/worktrees/new-branch"),
+        PathBuf::from(path!("/worktrees/new-branch")),
         "remote client should see the renamed path"
     );
 }
@@ -426,7 +428,7 @@ async fn test_repository_remove_nonexistent_worktree_remote_error(
     let result = cx_b
         .update(|cx| {
             repo_b.update(cx, |repo, cx| {
-                repo.remove_worktree(PathBuf::from("/worktrees/nonexistent"), false, cx)
+                repo.remove_worktree(PathBuf::from(path!("/worktrees/nonexistent")), false, cx)
             })
         })
         .await
@@ -475,14 +477,14 @@ async fn test_repository_worktree_ops_local(
     // Set up a worktree on disk + in state.
     client
         .fs()
-        .create_dir(Path::new("/worktrees/remove-me"))
+        .create_dir(Path::new(path!("/worktrees/remove-me")))
         .await
         .unwrap();
     client
         .fs()
         .with_git_state(Path::new(path!("/project/.git")), false, |state| {
             state.worktrees.push(git::repository::Worktree {
-                path: PathBuf::from("/worktrees/remove-me"),
+                path: PathBuf::from(path!("/worktrees/remove-me")),
                 ref_name: "refs/heads/remove-me".into(),
                 sha: "aaa111".into(),
             });
@@ -513,7 +515,7 @@ async fn test_repository_worktree_ops_local(
     // Remove the worktree via the local code path.
     cx_a.update(|cx| {
         repo.update(cx, |repo, cx| {
-            repo.remove_worktree(PathBuf::from("/worktrees/remove-me"), false, cx)
+            repo.remove_worktree(PathBuf::from(path!("/worktrees/remove-me")), false, cx)
         })
     })
     .await
@@ -523,7 +525,10 @@ async fn test_repository_worktree_ops_local(
 
     // Verify the directory was removed from the filesystem.
     assert!(
-        !client.fs().is_dir(Path::new("/worktrees/remove-me")).await,
+        !client
+            .fs()
+            .is_dir(Path::new(path!("/worktrees/remove-me")))
+            .await,
         "worktree directory should be removed from filesystem"
     );
 
@@ -553,14 +558,14 @@ async fn test_repository_worktree_ops_local(
     // Set up another worktree.
     client
         .fs()
-        .create_dir(Path::new("/worktrees/old-name"))
+        .create_dir(Path::new(path!("/worktrees/old-name")))
         .await
         .unwrap();
     client
         .fs()
         .with_git_state(Path::new(path!("/project/.git")), false, |state| {
             state.worktrees.push(git::repository::Worktree {
-                path: PathBuf::from("/worktrees/old-name"),
+                path: PathBuf::from(path!("/worktrees/old-name")),
                 ref_name: "refs/heads/old-name".into(),
                 sha: "bbb222".into(),
             });
@@ -578,8 +583,8 @@ async fn test_repository_worktree_ops_local(
     cx_a.update(|cx| {
         repo.update(cx, |repo, cx| {
             repo.rename_worktree(
-                PathBuf::from("/worktrees/old-name"),
-                PathBuf::from("/worktrees/new-name"),
+                PathBuf::from(path!("/worktrees/old-name")),
+                PathBuf::from(path!("/worktrees/new-name")),
                 cx,
             )
         })
@@ -591,11 +596,17 @@ async fn test_repository_worktree_ops_local(
 
     // Verify the filesystem reflects the rename.
     assert!(
-        !client.fs().is_dir(Path::new("/worktrees/old-name")).await,
+        !client
+            .fs()
+            .is_dir(Path::new(path!("/worktrees/old-name")))
+            .await,
         "old worktree directory should no longer exist"
     );
     assert!(
-        client.fs().is_dir(Path::new("/worktrees/new-name")).await,
+        client
+            .fs()
+            .is_dir(Path::new(path!("/worktrees/new-name")))
+            .await,
         "new worktree directory should exist"
     );
 
@@ -608,7 +619,7 @@ async fn test_repository_worktree_ops_local(
     assert_eq!(worktrees.len(), 1, "should still have one worktree");
     assert_eq!(
         worktrees[0].path,
-        PathBuf::from("/worktrees/new-name"),
+        PathBuf::from(path!("/worktrees/new-name")),
         "worktree should be renamed"
     );
 
@@ -639,8 +650,8 @@ async fn test_repository_rename_nonexistent_worktree_remote_error(
         .update(|cx| {
             repo_b.update(cx, |repo, cx| {
                 repo.rename_worktree(
-                    PathBuf::from("/worktrees/nonexistent"),
-                    PathBuf::from("/worktrees/new-name"),
+                    PathBuf::from(path!("/worktrees/nonexistent")),
+                    PathBuf::from(path!("/worktrees/new-name")),
                     cx,
                 )
             })
@@ -678,22 +689,23 @@ async fn test_repository_remove_dirty_worktree(
     // Pre-populate a dirty worktree on the host.
     client_a
         .fs()
-        .create_dir(Path::new("/worktrees/dirty-branch"))
+        .create_dir(Path::new(path!("/worktrees/dirty-branch")))
         .await
         .unwrap();
     client_a
         .fs()
         .with_git_state(Path::new(path!("/project/.git")), false, |state| {
             state.worktrees.push(git::repository::Worktree {
-                path: PathBuf::from("/worktrees/dirty-branch"),
+                path: PathBuf::from(path!("/worktrees/dirty-branch")),
                 ref_name: "refs/heads/dirty-branch".into(),
                 sha: "abc123".into(),
             });
             state
                 .dirty_worktrees
-                .insert(PathBuf::from("/worktrees/dirty-branch"));
+                .insert(PathBuf::from(path!("/worktrees/dirty-branch")));
         })
         .unwrap();
+    executor.run_until_parked();
 
     // Verify the worktree exists.
     let worktrees = cx_b
@@ -707,7 +719,7 @@ async fn test_repository_remove_dirty_worktree(
     let result = cx_b
         .update(|cx| {
             repo_b.update(cx, |repo, cx| {
-                repo.remove_worktree(PathBuf::from("/worktrees/dirty-branch"), false, cx)
+                repo.remove_worktree(PathBuf::from(path!("/worktrees/dirty-branch")), false, cx)
             })
         })
         .await
@@ -738,7 +750,7 @@ async fn test_repository_remove_dirty_worktree(
     // Now remove with force — should succeed.
     cx_b.update(|cx| {
         repo_b.update(cx, |repo, cx| {
-            repo.remove_worktree(PathBuf::from("/worktrees/dirty-branch"), true, cx)
+            repo.remove_worktree(PathBuf::from(path!("/worktrees/dirty-branch")), true, cx)
         })
     })
     .await
@@ -750,7 +762,7 @@ async fn test_repository_remove_dirty_worktree(
     assert!(
         !client_a
             .fs()
-            .is_dir(Path::new("/worktrees/dirty-branch"))
+            .is_dir(Path::new(path!("/worktrees/dirty-branch")))
             .await,
         "worktree directory should be removed from filesystem after force removal"
     );
@@ -817,7 +829,7 @@ async fn test_repository_create_worktree_emits_event(
         repo.update(cx, |repo, cx| {
             repo.create_worktree(
                 "new-feature".to_string(),
-                PathBuf::from("/worktrees"),
+                PathBuf::from(path!("/worktrees")),
                 None,
                 cx,
             )
@@ -846,7 +858,7 @@ async fn test_repository_create_worktree_emits_event(
     assert_eq!(worktrees.len(), 1, "should have one worktree after create");
     assert_eq!(
         worktrees[0].path,
-        PathBuf::from("/worktrees/new-feature"),
+        PathBuf::from(path!("/worktrees/new-feature")),
         "worktree should be at expected path"
     );
 }
@@ -875,20 +887,20 @@ async fn test_repository_remove_dirty_worktree_local(
     // Set up a dirty worktree.
     client
         .fs()
-        .create_dir(Path::new("/worktrees/dirty-local"))
+        .create_dir(Path::new(path!("/worktrees/dirty-local")))
         .await
         .unwrap();
     client
         .fs()
         .with_git_state(Path::new(path!("/project/.git")), false, |state| {
             state.worktrees.push(git::repository::Worktree {
-                path: PathBuf::from("/worktrees/dirty-local"),
+                path: PathBuf::from(path!("/worktrees/dirty-local")),
                 ref_name: "refs/heads/dirty-local".into(),
                 sha: "abc123".into(),
             });
             state
                 .dirty_worktrees
-                .insert(PathBuf::from("/worktrees/dirty-local"));
+                .insert(PathBuf::from(path!("/worktrees/dirty-local")));
         })
         .unwrap();
 
@@ -896,7 +908,7 @@ async fn test_repository_remove_dirty_worktree_local(
     let result = cx_a
         .update(|cx| {
             repo.update(cx, |repo, cx| {
-                repo.remove_worktree(PathBuf::from("/worktrees/dirty-local"), false, cx)
+                repo.remove_worktree(PathBuf::from(path!("/worktrees/dirty-local")), false, cx)
             })
         })
         .await
@@ -915,7 +927,7 @@ async fn test_repository_remove_dirty_worktree_local(
     assert!(
         client
             .fs()
-            .is_dir(Path::new("/worktrees/dirty-local"))
+            .is_dir(Path::new(path!("/worktrees/dirty-local")))
             .await,
         "directory should still exist after failed removal"
     );
@@ -923,7 +935,7 @@ async fn test_repository_remove_dirty_worktree_local(
     // Force removal should succeed.
     cx_a.update(|cx| {
         repo.update(cx, |repo, cx| {
-            repo.remove_worktree(PathBuf::from("/worktrees/dirty-local"), true, cx)
+            repo.remove_worktree(PathBuf::from(path!("/worktrees/dirty-local")), true, cx)
         })
     })
     .await
@@ -934,7 +946,7 @@ async fn test_repository_remove_dirty_worktree_local(
     assert!(
         !client
             .fs()
-            .is_dir(Path::new("/worktrees/dirty-local"))
+            .is_dir(Path::new(path!("/worktrees/dirty-local")))
             .await,
         "directory should be removed after force removal"
     );
@@ -964,19 +976,19 @@ async fn test_repository_rename_worktree_destination_exists(
     // Set up a source worktree and a pre-existing destination directory.
     client
         .fs()
-        .create_dir(Path::new("/worktrees/source"))
+        .create_dir(Path::new(path!("/worktrees/source")))
         .await
         .unwrap();
     client
         .fs()
-        .create_dir(Path::new("/worktrees/destination"))
+        .create_dir(Path::new(path!("/worktrees/destination")))
         .await
         .unwrap();
     client
         .fs()
         .with_git_state(Path::new(path!("/project/.git")), false, |state| {
             state.worktrees.push(git::repository::Worktree {
-                path: PathBuf::from("/worktrees/source"),
+                path: PathBuf::from(path!("/worktrees/source")),
                 ref_name: "refs/heads/source".into(),
                 sha: "abc123".into(),
             });
@@ -988,8 +1000,8 @@ async fn test_repository_rename_worktree_destination_exists(
         .update(|cx| {
             repo.update(cx, |repo, cx| {
                 repo.rename_worktree(
-                    PathBuf::from("/worktrees/source"),
-                    PathBuf::from("/worktrees/destination"),
+                    PathBuf::from(path!("/worktrees/source")),
+                    PathBuf::from(path!("/worktrees/destination")),
                     cx,
                 )
             })
@@ -1003,7 +1015,10 @@ async fn test_repository_rename_worktree_destination_exists(
 
     // Source directory should still exist.
     assert!(
-        client.fs().is_dir(Path::new("/worktrees/source")).await,
+        client
+            .fs()
+            .is_dir(Path::new(path!("/worktrees/source")))
+            .await,
         "source directory should still exist after failed rename"
     );
 
@@ -1014,7 +1029,7 @@ async fn test_repository_rename_worktree_destination_exists(
         .unwrap()
         .unwrap();
     assert_eq!(worktrees.len(), 1);
-    assert_eq!(worktrees[0].path, PathBuf::from("/worktrees/source"));
+    assert_eq!(worktrees[0].path, PathBuf::from(path!("/worktrees/source")));
 }
 
 #[gpui::test]
@@ -1049,7 +1064,12 @@ async fn test_repository_create_then_remove_worktree(
     // Create a worktree.
     cx_a.update(|cx| {
         repo.update(cx, |repo, cx| {
-            repo.create_worktree("feature".to_string(), PathBuf::from("/worktrees"), None, cx)
+            repo.create_worktree(
+                "feature".to_string(),
+                PathBuf::from(path!("/worktrees")),
+                None,
+                cx,
+            )
         })
     })
     .await
@@ -1063,16 +1083,22 @@ async fn test_repository_create_then_remove_worktree(
         .unwrap()
         .unwrap();
     assert_eq!(worktrees.len(), 1, "should have one worktree after create");
-    assert_eq!(worktrees[0].path, PathBuf::from("/worktrees/feature"));
+    assert_eq!(
+        worktrees[0].path,
+        PathBuf::from(path!("/worktrees/feature"))
+    );
     assert!(
-        client.fs().is_dir(Path::new("/worktrees/feature")).await,
+        client
+            .fs()
+            .is_dir(Path::new(path!("/worktrees/feature")))
+            .await,
         "worktree directory should exist after create"
     );
 
     // Remove the worktree.
     cx_a.update(|cx| {
         repo.update(cx, |repo, cx| {
-            repo.remove_worktree(PathBuf::from("/worktrees/feature"), false, cx)
+            repo.remove_worktree(PathBuf::from(path!("/worktrees/feature")), false, cx)
         })
     })
     .await
@@ -1090,7 +1116,10 @@ async fn test_repository_create_then_remove_worktree(
         "should have no worktrees after remove"
     );
     assert!(
-        !client.fs().is_dir(Path::new("/worktrees/feature")).await,
+        !client
+            .fs()
+            .is_dir(Path::new(path!("/worktrees/feature")))
+            .await,
         "worktree directory should be removed"
     );
 }
@@ -1113,13 +1142,14 @@ async fn test_repository_create_worktree_remote_emits_event(
             remote_events.lock().push(event.clone());
         })
     });
+    executor.run_until_parked();
 
     // Create a worktree via the remote RPC path.
     cx_b.update(|cx| {
         repo_b.update(cx, |repo, cx| {
             repo.create_worktree(
                 "remote-feature".to_string(),
-                PathBuf::from("/worktrees"),
+                PathBuf::from(path!("/worktrees")),
                 None,
                 cx,
             )
@@ -1152,7 +1182,7 @@ async fn test_repository_create_worktree_remote_emits_event(
     );
     assert_eq!(
         remote_worktrees[0].path,
-        PathBuf::from("/worktrees/remote-feature"),
+        PathBuf::from(path!("/worktrees/remote-feature")),
         "remote client should see the created worktree at the expected path"
     );
 }
@@ -1189,7 +1219,12 @@ async fn test_repository_create_worktree_duplicate_branch(
     // Create a worktree for branch "feature" — should succeed.
     cx_a.update(|cx| {
         repo.update(cx, |repo, cx| {
-            repo.create_worktree("feature".to_string(), PathBuf::from("/worktrees"), None, cx)
+            repo.create_worktree(
+                "feature".to_string(),
+                PathBuf::from(path!("/worktrees")),
+                None,
+                cx,
+            )
         })
     })
     .await
@@ -1214,7 +1249,7 @@ async fn test_repository_create_worktree_duplicate_branch(
             repo.update(cx, |repo, cx| {
                 repo.create_worktree(
                     "feature".to_string(),
-                    PathBuf::from("/other-worktrees"),
+                    PathBuf::from(path!("/other-worktrees")),
                     None,
                     cx,
                 )
@@ -1246,7 +1281,7 @@ async fn test_repository_create_worktree_duplicate_branch(
     );
     assert_eq!(
         worktrees[0].path,
-        PathBuf::from("/worktrees/feature"),
+        PathBuf::from(path!("/worktrees/feature")),
         "original worktree should be unaffected"
     );
 }
@@ -1267,14 +1302,14 @@ async fn test_repository_host_sees_worktrees_changed_on_remote_op(
     // Pre-populate a worktree on the host.
     client_a
         .fs()
-        .create_dir(Path::new("/worktrees/host-branch"))
+        .create_dir(Path::new(path!("/worktrees/host-branch")))
         .await
         .unwrap();
     client_a
         .fs()
         .with_git_state(Path::new(path!("/project/.git")), false, |state| {
             state.worktrees.push(git::repository::Worktree {
-                path: PathBuf::from("/worktrees/host-branch"),
+                path: PathBuf::from(path!("/worktrees/host-branch")),
                 ref_name: "refs/heads/host-branch".into(),
                 sha: "abc123".into(),
             });
@@ -1294,7 +1329,7 @@ async fn test_repository_host_sees_worktrees_changed_on_remote_op(
     // Client B removes the worktree via the remote RPC path.
     cx_b.update(|cx| {
         repo_b.update(cx, |repo, cx| {
-            repo.remove_worktree(PathBuf::from("/worktrees/host-branch"), false, cx)
+            repo.remove_worktree(PathBuf::from(path!("/worktrees/host-branch")), false, cx)
         })
     })
     .await

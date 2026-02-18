@@ -7048,6 +7048,7 @@ dependencies = [
  "async-trait",
  "collections",
  "derive_more 0.99.20",
+ "dunce",
  "futures 0.3.31",
  "git2",
  "gpui",
