@@ -465,7 +465,7 @@ impl GitRepository for FakeGitRepository {
         let dot_git_path = self.dot_git_path.clone();
         async move {
             executor.simulate_random_delay().await;
-            // Validate before any side effects (read-only check)
+            // Validate before any side effects
             fs.with_git_state(&dot_git_path, false, {
                 let path = path.clone();
                 move |state| {
@@ -508,7 +508,7 @@ impl GitRepository for FakeGitRepository {
         let dot_git_path = self.dot_git_path.clone();
         async move {
             executor.simulate_random_delay().await;
-            // Validate before any side effects (read-only check)
+            // Validate before any side effects
             fs.with_git_state(&dot_git_path, false, {
                 let old_path = old_path.clone();
                 move |state| {
