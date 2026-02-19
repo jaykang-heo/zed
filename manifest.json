@@ -203,6 +203,12 @@
       "title": "Add gemini-3.1-pro-preview model",
       "file": "suggestions/PR-49622.md",
       "date": "2026-02-19T18:21:25Z"
+    },
+    {
+      "pr": 49554,
+      "title": "Allow using Zeta through an arbitrary OpenAI-compatible self-hosted API",
+      "file": "suggestions/PR-49554.md",
+      "date": "2026-02-19T20:21:04Z"
     }
   ]
 }
