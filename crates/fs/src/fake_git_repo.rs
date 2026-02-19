@@ -543,9 +543,9 @@ impl GitRepository for FakeGitRepository {
             fs.with_git_state(&dot_git_path, true, move |state| {
                 if let Some(worktree) = state.worktrees.iter_mut().find(|w| w.path == old_path) {
                     worktree.path = new_path.clone();
-                }
-                if state.dirty_worktrees.remove(&old_path) {
-                    state.dirty_worktrees.insert(new_path);
+                    if state.dirty_worktrees.remove(&old_path) {
+                        state.dirty_worktrees.insert(new_path);
+                    }
                 }
                 Ok::<(), anyhow::Error>(())
             })??;
