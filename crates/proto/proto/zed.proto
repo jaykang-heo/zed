@@ -471,8 +471,11 @@ message Envelope {
         GetFoldingRanges get_folding_ranges = 421;
         GetFoldingRangesResponse get_folding_ranges_response = 422;
 
-        GitRemoveWorktree git_remove_worktree = 423;
-        GitRenameWorktree git_rename_worktree = 424; // current max
+        GetRemoteProfilingData get_remote_profiling_data = 423;
+        GetRemoteProfilingDataResponse get_remote_profiling_data_response = 424;
+
+        GitRemoveWorktree git_remove_worktree = 425;
+        GitRenameWorktree git_rename_worktree = 426; // current max
     }
 
     reserved 87 to 88;
