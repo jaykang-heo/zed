@@ -5751,24 +5751,27 @@ impl AcpThreadView {
                             );
                         }
 
-                        // Apply button — closes the dropdown, confirming the selection.
-                        // The actual persistence happens when the user clicks Allow/Deny.
+                        let any_patterns_checked = select_options_active && !checked.is_empty();
                         let dropdown_handle = dropdown_handle.clone();
-                        menu = menu.custom_entry(
-                            move |_window, _cx| {
-                                h_flex()
-                                    .w_full()
-                                    .justify_center()
-                                    .child(
-                                        Button::new("apply-patterns", "Apply")
-                                            .label_size(LabelSize::Small),
-                                    )
-                                    .into_any_element()
-                            },
-                            move |_window, cx| {
-                                dropdown_handle.hide(cx);
-                            },
-                        );
+                        menu = menu.custom_row(move |_window, _cx| {
+                            div()
+                                .py_1()
+                                .w_full()
+                                .child(
+                                    Button::new("apply-patterns", "Apply")
+                                        .full_width()
+                                        .style(ButtonStyle::Outlined)
+                                        .label_size(LabelSize::Small)
+                                        .disabled(!any_patterns_checked)
+                                        .on_click({
+                                            let dropdown_handle = dropdown_handle.clone();
+                                            move |_event, _window, cx| {
+                                                dropdown_handle.hide(cx);
+                                            }
+                                        }),
+                                )
+                                .into_any_element()
+                        });
 
                         menu
                     },
