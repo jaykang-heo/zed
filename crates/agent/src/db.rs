@@ -8,6 +8,7 @@ use collections::{HashMap, IndexMap};
 use futures::{FutureExt, future::Shared};
 use gpui::{BackgroundExecutor, Global, Task};
 use indoc::indoc;
+use language_model::Speed;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sqlez::{
@@ -70,6 +71,12 @@ pub struct DbThread {
     pub subagent_context: Option<crate::SubagentContext>,
     #[serde(default)]
     pub git_worktree_info: Option<AgentGitWorktreeInfo>,
+    #[serde(default)]
+    pub speed: Option<Speed>,
+    #[serde(default)]
+    pub thinking_enabled: bool,
+    #[serde(default)]
+    pub thinking_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +116,9 @@ impl SharedThread {
             imported: true,
             subagent_context: None,
             git_worktree_info: None,
+            speed: None,
+            thinking_enabled: false,
+            thinking_effort: None,
         }
     }
 
@@ -284,6 +294,9 @@ impl DbThread {
             imported: false,
             subagent_context: None,
             git_worktree_info: None,
+            speed: None,
+            thinking_enabled: false,
+            thinking_effort: None,
         })
     }
 }
@@ -610,6 +623,9 @@ mod tests {
             imported: false,
             subagent_context: None,
             git_worktree_info: None,
+            speed: None,
+            thinking_enabled: false,
+            thinking_effort: None,
         }
     }
 

@@ -1,6 +1,6 @@
 use cloud_api_types::{SubmitAgentThreadFeedbackBody, SubmitAgentThreadFeedbackCommentsBody};
 use gpui::{Corner, List};
-use language_model::LanguageModelEffortLevel;
+use language_model::{LanguageModelEffortLevel, Speed};
 use settings::update_settings_file;
 use ui::{ButtonLike, SplitButton, SplitButtonStyle, Tab};
 
@@ -2487,6 +2487,7 @@ impl AcpThreadView {
                             .gap_0p5()
                             .child(self.render_add_context_button(cx))
                             .child(self.render_follow_toggle(cx))
+                            .children(self.render_fast_mode_control(cx))
                             .children(self.render_thinking_control(cx)),
                     )
                     .child(
@@ -2909,6 +2910,47 @@ impl AcpThreadView {
                     .into_any_element(),
             )
         }
+    }
+
+    fn render_fast_mode_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !cx.is_staff() {
+            return None;
+        }
+
+        let thread = self.as_native_thread(cx)?.read(cx);
+        let model = thread.model()?;
+
+        // TODO: restore this guard after testing fast mode
+        // if !model.supports_fast_mode() {
+        //     return None;
+        // }
+
+        let (tooltip_label, color) = if matches!(thread.speed(), Some(Speed::Fast)) {
+            ("Disable Fast Mode", Color::Accent)
+        } else {
+            ("Enable Fast Mode", Color::Muted)
+        };
+
+        Some(
+            IconButton::new("fast-mode", IconName::BoltFilled)
+                .icon_size(IconSize::Small)
+                .icon_color(color)
+                .tooltip(Tooltip::text(tooltip_label))
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    if let Some(thread) = this.as_native_thread(cx) {
+                        thread.update(cx, |thread, cx| {
+                            thread.set_speed(
+                                thread
+                                    .speed()
+                                    .map(|speed| speed.toggle())
+                                    .unwrap_or(Speed::Fast),
+                                cx,
+                            );
+                        });
+                    }
+                }))
+                .into_any_element(),
+        )
     }
 
     fn render_thinking_control(&self, cx: &mut Context<Self>) -> Option<AnyElement> {

@@ -163,6 +163,9 @@ mod tests {
             imported: false,
             subagent_context: None,
             git_worktree_info: None,
+            speed: None,
+            thinking_enabled: false,
+            thinking_effort: None,
         }
     }
 

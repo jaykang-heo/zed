@@ -452,6 +452,23 @@ pub struct LanguageModelRequest {
     pub temperature: Option<f32>,
     pub thinking_allowed: bool,
     pub thinking_effort: Option<String>,
+    pub speed: Option<Speed>,
+}
+
+#[derive(Clone, Copy, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Speed {
+    #[default]
+    Standard,
+    Fast,
+}
+
+impl Speed {
+    pub fn toggle(self) -> Self {
+        match self {
+            Speed::Standard => Speed::Fast,
+            Speed::Fast => Speed::Standard,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
