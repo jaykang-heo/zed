@@ -51,7 +51,10 @@ pub(crate) fn convert_lhs_rows_to_rhs(
         lhs_snapshot,
         rhs_snapshot,
         lhs_bounds,
-        |diff, range, buffer| diff.patch_for_base_text_range(range, buffer),
+        |diff, range, buffer| {
+            dbg!(buffer.remote_id());
+            dbg!(diff.patch_for_base_text_range(range, buffer))
+        },
     )
 }
 
@@ -199,7 +202,7 @@ where
 
         let diff = source_snapshot
             .diff_for_buffer_id(first.source_buffer.remote_id())
-            .unwrap();
+            .expect("missing diff");
         let rhs_buffer = if first.source_buffer.remote_id() == diff.base_text().remote_id() {
             first.target_buffer
         } else {
@@ -288,6 +291,7 @@ fn patch_for_excerpt(
     let target_multibuffer_range = target_snapshot
         .range_for_excerpt(target_excerpt_id)
         .unwrap();
+    dbg!(&source_multibuffer_range, &target_multibuffer_range);
     let target_excerpt_start_in_multibuffer = target_multibuffer_range.start;
     let target_context_range = target_snapshot
         .context_range_for_excerpt(target_excerpt_id)
@@ -337,7 +341,7 @@ fn patch_for_excerpt(
     let mut merged_edits: Vec<text::Edit<Point>> = Vec::new();
     for edit in edits {
         if let Some(last) = merged_edits.last_mut() {
-            if edit.new.start <= last.new.end {
+            if edit.new.start <= last.new.end || edit.old.start <= last.old.end {
                 last.old.end = last.old.end.max(edit.old.end);
                 last.new.end = last.new.end.max(edit.new.end);
                 continue;
@@ -1243,6 +1247,130 @@ impl SplittableEditor {
         }
     }
 
+    fn check_excerpt_sync_invariants(&self, cx: &mut App) {
+        log::info!("check excerpt invariants");
+        let Some(lhs) = &self.lhs else {
+            return;
+        };
+
+        let rhs_display_map = self.rhs_editor.read(cx).display_map.read(cx);
+        let Some(companion) = rhs_display_map.companion() else {
+            panic!("split editor missing companion");
+        };
+        let companion = companion.read(cx);
+
+        let lhs_excerpt_ids = lhs.multibuffer.read(cx).excerpt_ids();
+        let rhs_excerpt_ids = self.rhs_multibuffer.read(cx).excerpt_ids();
+        log::info!(
+            "lhs_excerpt_ids: {:?}, rhs_excerpt_ids: {:?}",
+            lhs_excerpt_ids,
+            rhs_excerpt_ids
+        );
+        for excerpt_id in &lhs_excerpt_ids {
+            let path = lhs.multibuffer.read(cx).path_for_excerpt(*excerpt_id);
+            log::info!("lhs excerpt {:?} has path {:?}", excerpt_id, path);
+        }
+        for excerpt_id in &rhs_excerpt_ids {
+            let path = self.rhs_multibuffer.read(cx).path_for_excerpt(*excerpt_id);
+            log::info!("rhs excerpt {:?} has path {:?}", excerpt_id, path);
+        }
+
+        let lhs_to_rhs = companion.lhs_to_rhs_excerpt_mappings();
+        let rhs_to_lhs = companion.rhs_to_lhs_excerpt_mappings();
+
+        for (lhs_id, rhs_id) in lhs_to_rhs {
+            assert_eq!(
+                rhs_to_lhs.get(rhs_id),
+                Some(lhs_id),
+                "Missing reverse mapping for lhs:{:?} -> rhs:{:?}",
+                lhs_id,
+                rhs_id
+            );
+
+            assert!(
+                lhs_excerpt_ids.contains(&lhs_id),
+                "Stale LHS excerpt ID in mapping: {:?}",
+                lhs_id
+            );
+            assert!(
+                rhs_excerpt_ids.contains(&rhs_id),
+                "Stale RHS excerpt ID in mapping: {:?}",
+                rhs_id
+            );
+        }
+
+        for (rhs_id, lhs_id) in rhs_to_lhs {
+            assert_eq!(
+                lhs_to_rhs.get(lhs_id),
+                Some(rhs_id),
+                "Missing forward mapping for rhs:{:?} -> lhs:{:?}",
+                rhs_id,
+                lhs_id
+            );
+        }
+
+        assert_eq!(
+            lhs_excerpt_ids.len(),
+            lhs_to_rhs.len(),
+            "Not all LHS excerpts have mappings. LHS excerpts: {:?}, mappings: {:?}",
+            lhs_excerpt_ids,
+            lhs_to_rhs.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            rhs_excerpt_ids.len(),
+            rhs_to_lhs.len(),
+            "Not all RHS excerpts have mappings. RHS excerpts: {:?}, mappings: {:?}",
+            rhs_excerpt_ids,
+            rhs_to_lhs.keys().collect::<Vec<_>>()
+        );
+
+        let lhs_to_rhs_buffer = companion.lhs_to_rhs_buffer_mappings();
+        let rhs_to_lhs_buffer = companion.rhs_to_lhs_buffer_mappings();
+
+        for (lhs_buffer_id, rhs_buffer_id) in lhs_to_rhs_buffer {
+            assert_eq!(
+                rhs_to_lhs_buffer.get(rhs_buffer_id),
+                Some(lhs_buffer_id),
+                "Missing reverse buffer mapping for lhs:{:?} -> rhs:{:?}",
+                lhs_buffer_id,
+                rhs_buffer_id
+            );
+        }
+
+        // Verify that excerpt ordering is consistent between LHS and RHS
+        // Sort LHS excerpt IDs by the order their corresponding RHS excerpts appear
+        let lhs_sorted_by_rhs_order: Vec<_> = lhs_excerpt_ids
+            .iter()
+            .map(|lhs_id| {
+                let rhs_id = lhs_to_rhs.get(lhs_id).unwrap();
+                let rhs_pos = rhs_excerpt_ids.iter().position(|id| id == rhs_id).unwrap();
+                (rhs_pos, *lhs_id)
+            })
+            .sorted_by_key(|(pos, _)| *pos)
+            .map(|(_, id)| id)
+            .collect();
+        assert_eq!(
+            lhs_excerpt_ids, lhs_sorted_by_rhs_order,
+            "LHS excerpt order should match RHS excerpt order"
+        );
+
+        // Sort RHS excerpt IDs by the order their corresponding LHS excerpts appear
+        let rhs_sorted_by_lhs_order: Vec<_> = rhs_excerpt_ids
+            .iter()
+            .map(|rhs_id| {
+                let lhs_id = rhs_to_lhs.get(rhs_id).unwrap();
+                let lhs_pos = lhs_excerpt_ids.iter().position(|id| id == lhs_id).unwrap();
+                (lhs_pos, *rhs_id)
+            })
+            .sorted_by_key(|(pos, _)| *pos)
+            .map(|(_, id)| id)
+            .collect();
+        assert_eq!(
+            rhs_excerpt_ids, rhs_sorted_by_lhs_order,
+            "RHS excerpt order should match LHS excerpt order"
+        );
+    }
+
     fn debug_print(&self, cx: &mut App) {
         use crate::DisplayRow;
         use crate::display_map::Block;
@@ -1583,6 +1711,7 @@ impl SplittableEditor {
                         .map(|hunk| hunk.buffer_range.to_point(&buffer_snapshot))
                         .collect::<Vec<_>>()
                 });
+                log::info!("adding excerpts for new buffer");
                 self.set_excerpts_for_path(path, buffer, ranges, 2, diff, cx);
             } else {
                 log::info!("removing excerpts");
@@ -1984,6 +2113,7 @@ fn mutate_excerpts_for_paths<R>(
                 if group.len() == 1 {
                     final_rhs_ids.push(group[0]);
                 } else {
+                    dbg!("MERGING");
                     let merged_id = rhs_multibuffer.merge_excerpts(&group, cx);
                     final_rhs_ids.push(merged_id);
                 }
@@ -2056,9 +2186,10 @@ impl LhsEditor {
                 };
                 let rhs = excerpt_range.primary.to_point(main_buffer);
                 let context = excerpt_range.context.to_point(main_buffer);
+                dbg!(&rhs, &context);
                 ExcerptRange {
-                    primary: point_range_to_base_text_point_range(rhs),
-                    context: point_range_to_base_text_point_range(context),
+                    primary: dbg!(point_range_to_base_text_point_range(rhs)),
+                    context: dbg!(point_range_to_base_text_point_range(context)),
                 }
             })
             .collect();
@@ -2343,6 +2474,171 @@ mod tests {
             editor.update(cx, |editor, cx| {
                 editor.check_invariants(quiesced, cx);
             });
+        }
+    }
+
+    #[gpui::test(iterations = 100)]
+    async fn test_random_excerpt_sync(mut rng: StdRng, cx: &mut gpui::TestAppContext) {
+        use rand::prelude::*;
+
+        let (editor, cx) = init_test(cx, SoftWrap::EditorWidth, DiffViewStyle::Split).await;
+        let operations = std::env::var("OPERATIONS")
+            .map(|i| i.parse().expect("invalid `OPERATIONS` variable"))
+            .unwrap_or(20);
+        let max_buffers = std::env::var("MAX_BUFFERS")
+            .map(|i| i.parse().expect("invalid `MAX_BUFFERS` variable"))
+            .unwrap_or(4);
+        let rng = &mut rng;
+
+        editor.update(cx, |editor, cx| {
+            editor.randomly_edit_excerpts(rng, 2, cx);
+        });
+        cx.run_until_parked();
+
+        for _ in 0..operations {
+            let buffers = editor.update(cx, |editor, cx| {
+                editor.rhs_editor.read(cx).buffer().read(cx).all_buffers()
+            });
+            let is_split = editor.read_with(cx, |editor, _| editor.is_split());
+
+            if buffers.is_empty() {
+                log::info!("adding excerpts to empty multibuffer");
+                editor.update(cx, |editor, cx| {
+                    editor.randomly_edit_excerpts(rng, 2, cx);
+                });
+                cx.run_until_parked();
+                if is_split {
+                    editor.update(cx, |editor, cx| {
+                        editor.check_excerpt_sync_invariants(cx);
+                    });
+                }
+                continue;
+            }
+
+            match rng.random_range(0..100) {
+                0..=24 => {
+                    log::info!("set_excerpts_for_path based on diff hunks");
+                    let buffer = buffers.iter().choose(rng).unwrap().clone();
+                    let buffer_snapshot = buffer.read_with(cx, |buffer, _| buffer.text_snapshot());
+                    let diff = editor.update(cx, |editor, cx| {
+                        editor
+                            .rhs_multibuffer
+                            .read(cx)
+                            .diff_for(buffer.read(cx).remote_id())
+                    });
+                    if let Some(diff) = diff {
+                        diff.update(cx, |diff, cx| {
+                            diff.recalculate_diff_sync(&buffer_snapshot, cx);
+                        });
+                        cx.run_until_parked();
+                        let diff_snapshot = diff.read_with(cx, |diff, cx| diff.snapshot(cx));
+                        let ranges = diff_snapshot
+                            .hunks(&buffer_snapshot)
+                            .map(|hunk| hunk.range)
+                            .collect::<Vec<_>>();
+                        editor.update(cx, |editor, cx| {
+                            let path = PathKey::for_buffer(&buffer, cx);
+                            editor.set_excerpts_for_path(path, buffer, ranges, 2, diff, cx);
+                        });
+                    }
+                }
+                25..=44 => {
+                    log::info!("randomly editing individual buffer");
+                    let buffer = buffers.iter().choose(rng).unwrap();
+                    buffer.update(cx, |buffer, cx| {
+                        buffer.randomly_edit(rng, 3, cx);
+                    });
+                }
+                45..=59 => {
+                    log::info!("randomly editing multibuffer");
+                    editor.update(cx, |editor, cx| {
+                        editor.rhs_multibuffer.update(cx, |multibuffer, cx| {
+                            multibuffer.randomly_edit(rng, 5, cx);
+                        })
+                    });
+                }
+                60..=74 => {
+                    log::info!("expanding excerpts");
+                    let excerpt_ids = editor.read_with(cx, |editor, cx| {
+                        editor.rhs_multibuffer.read(cx).excerpt_ids()
+                    });
+                    if !excerpt_ids.is_empty() {
+                        let mut excerpts_to_expand = HashSet::default();
+                        for _ in 0..rng.random_range(1..=excerpt_ids.len().min(3)) {
+                            excerpts_to_expand.extend(excerpt_ids.choose(rng).copied());
+                        }
+                        let line_count = rng.random_range(1..5);
+                        editor.update(cx, |editor, cx| {
+                            editor.expand_excerpts(
+                                excerpts_to_expand.iter().cloned(),
+                                line_count,
+                                crate::ExpandExcerptDirection::UpAndDown,
+                                cx,
+                            );
+                        });
+                    }
+                }
+                75..=84 => {
+                    log::info!("remove_excerpts_for_path");
+                    let paths: Vec<_> = editor.read_with(cx, |editor, cx| {
+                        editor.rhs_multibuffer.read(cx).paths().cloned().collect()
+                    });
+                    if !paths.is_empty() {
+                        let path = paths.choose(rng).unwrap().clone();
+                        editor.update(cx, |editor, cx| {
+                            editor.remove_excerpts_for_path(path, cx);
+                        });
+                    }
+                }
+                85..=94 => {
+                    log::info!("split -> unsplit -> split cycle");
+                    let is_split = editor.read_with(cx, |editor, _| editor.is_split());
+                    if is_split {
+                        cx.update_window_entity(&editor, |editor, window, cx| {
+                            editor.unsplit(window, cx);
+                            assert!(editor.lhs.is_none(), "should be unsplit after unsplit()");
+                            editor.split(window, cx);
+                            assert!(editor.lhs.is_some(), "should be split after split()");
+                        });
+                    }
+                }
+                _ => {
+                    log::info!("buffer undo/redo");
+                    let buffer = buffers.iter().choose(rng).unwrap();
+                    buffer.update(cx, |buffer, cx| {
+                        buffer.randomly_undo_redo(rng, cx);
+                    });
+                }
+            }
+
+            cx.run_until_parked();
+
+            let is_split = editor.read_with(cx, |editor, _| editor.is_split());
+            if is_split {
+                editor.update(cx, |editor, cx| {
+                    editor.check_excerpt_sync_invariants(cx);
+                });
+            }
+
+            let paths_count = editor.read_with(cx, |editor, cx| {
+                editor.rhs_multibuffer.read(cx).paths().count()
+            });
+            if paths_count < max_buffers && rng.random_bool(0.1) {
+                log::info!("adding new buffer");
+                editor.update(cx, |editor, cx| {
+                    editor.randomly_edit_excerpts(rng, 1, cx);
+                    // FIXME
+                    if is_split {
+                        editor.check_excerpt_sync_invariants(cx);
+                    }
+                });
+                cx.run_until_parked();
+                if is_split {
+                    editor.update(cx, |editor, cx| {
+                        editor.check_excerpt_sync_invariants(cx);
+                    });
+                }
+            }
         }
     }
 

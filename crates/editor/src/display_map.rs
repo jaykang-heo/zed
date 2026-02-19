@@ -314,8 +314,9 @@ impl Companion {
         .next();
 
         let Some(excerpt) = excerpt else {
-            return Point::zero()..our_snapshot.max_point();
+            return dbg!(Point::zero()..our_snapshot.max_point());
         };
+        dbg!(&excerpt.patch);
         excerpt.patch.edit_for_old_position(point).new
     }
 
@@ -391,6 +392,26 @@ impl Companion {
     pub(crate) fn add_buffer_mapping(&mut self, lhs_buffer: BufferId, rhs_buffer: BufferId) {
         self.lhs_buffer_to_rhs_buffer.insert(lhs_buffer, rhs_buffer);
         self.rhs_buffer_to_lhs_buffer.insert(rhs_buffer, lhs_buffer);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn lhs_to_rhs_excerpt_mappings(&self) -> &HashMap<ExcerptId, ExcerptId> {
+        &self.lhs_excerpt_to_rhs_excerpt
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn rhs_to_lhs_excerpt_mappings(&self) -> &HashMap<ExcerptId, ExcerptId> {
+        &self.rhs_excerpt_to_lhs_excerpt
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn lhs_to_rhs_buffer_mappings(&self) -> &HashMap<BufferId, BufferId> {
+        &self.lhs_buffer_to_rhs_buffer
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn rhs_to_lhs_buffer_mappings(&self) -> &HashMap<BufferId, BufferId> {
+        &self.rhs_buffer_to_lhs_buffer
     }
 }
 
