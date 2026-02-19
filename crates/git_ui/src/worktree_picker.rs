@@ -52,7 +52,6 @@ pub struct WorktreeList {
     pub picker: Entity<Picker<WorktreeListDelegate>>,
     picker_focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
-    _initial_fetch_task: Option<Task<()>>,
     _worktree_refresh_task: Option<Task<()>>,
     embedded: bool,
 }
@@ -166,8 +165,7 @@ impl WorktreeList {
             picker_focus_handle,
             width,
             _subscriptions,
-            _initial_fetch_task: Some(initial_fetch_task),
-            _worktree_refresh_task: None,
+            _worktree_refresh_task: Some(initial_fetch_task),
             embedded,
         }
     }
