@@ -448,4 +448,30 @@ mod tests {
         let edits = parse_edits(output, editable_range, &snapshot).unwrap();
         assert!(edits.is_empty());
     }
+
+    #[gpui::test]
+    fn test_parse_edits_cyrillic_text_with_blank_line(cx: &mut App) {
+        let text = "Отец с двумя детьми";
+        let buffer = cx.new(|cx| Buffer::local(text, cx));
+        let snapshot = buffer.read(cx).snapshot();
+
+        let output = "<|editable_region_start|>\n\n+ Отец с двумя детьми";
+        let editable_range = 0..text.len();
+
+        let edits = parse_edits(output, editable_range, &snapshot).unwrap();
+        assert_eq!(edits.len(), 1);
+    }
+
+    #[gpui::test]
+    fn test_parse_edits_no_end_marker_cyrillic(cx: &mut App) {
+        let text = "Привет мир";
+        let buffer = cx.new(|cx| Buffer::local(text, cx));
+        let snapshot = buffer.read(cx).snapshot();
+
+        let output = "<|editable_region_start|>\nПривет мир";
+        let editable_range = 0..text.len();
+
+        let edits = parse_edits(output, editable_range, &snapshot).unwrap();
+        assert!(edits.is_empty());
+    }
 }
