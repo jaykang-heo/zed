@@ -3,8 +3,8 @@ use crate::{
     DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool, FetchTool,
     FindPathTool, GrepTool, ListDirectoryTool, MovePathTool, NowTool, OpenTool, ProjectSnapshot,
     ReadFileTool, RestoreFileFromDiskTool, SaveFileTool, StreamingEditFileTool, SubagentTool,
-    SystemPromptTemplate, Template, Templates, TerminalTool, ToolPermissionDecision, WebSearchTool,
-    decide_permission_from_settings,
+    SystemPromptTemplate, Template, Templates, TerminalAction, TerminalTool,
+    ToolPermissionDecision, WebSearchTool, decide_permission_from_settings,
 };
 use acp_thread::{MentionUri, UserMessageId};
 use action_log::ActionLog;
@@ -635,12 +635,9 @@ pub trait ThreadEnvironment {
 }
 
 fn is_terminal_send_input(tool_name: &str, input: &serde_json::Value) -> bool {
-    tool_name == "terminal"
-        && input
-            .get("action")
-            .and_then(|a| a.get("type"))
-            .and_then(|t| t.as_str())
-            == Some("SendInput")
+    tool_name == TerminalTool::NAME
+        && TerminalAction::parse_from_json(input)
+            .is_some_and(|a| matches!(a, TerminalAction::SendInput { .. }))
 }
 
 #[derive(Debug)]
@@ -1485,15 +1482,24 @@ impl Thread {
             }
         }
 
+        let environment = self.environment.clone();
+
         let Some(running_turn) = self.running_turn.take() else {
             self.flush_pending_message(cx);
-            return Task::ready(());
+            return cx.spawn(async move |_this, cx| {
+                if let Some(env) = environment {
+                    env.kill_all_terminals(cx).log_err();
+                }
+            });
         };
 
         let turn_task = running_turn.cancel();
 
         cx.spawn(async move |this, cx| {
             turn_task.await;
+            if let Some(env) = environment {
+                env.kill_all_terminals(cx).log_err();
+            }
             this.update(cx, |this, cx| {
                 this.flush_pending_message(cx);
             })

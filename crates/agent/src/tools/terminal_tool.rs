@@ -63,12 +63,10 @@ pub enum TerminalAction {
         cd: String,
     },
     /// Sends input to an already-running process.
-    /// Use this to interact with interactive programs (e.g., send "q" to quit less).
-    /// A newline is automatically appended to the input.
     SendInput {
         /// The ID of the terminal to send input to (from a previous RunCmd).
         terminal_id: String,
-        /// The input string to send. A newline will be appended automatically.
+        /// The input string to send (e.g., "q\n" to quit less, or "\x03" for Ctrl+C).
         input: String,
     },
 }
