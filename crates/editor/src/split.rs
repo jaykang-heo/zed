@@ -6,7 +6,9 @@ use std::{
 use buffer_diff::{BufferDiff, BufferDiffSnapshot};
 use collections::HashMap;
 
-use gpui::{Action, AppContext as _, Entity, EventEmitter, Focusable, Subscription, WeakEntity};
+use gpui::{
+    Action, AppContext as _, Entity, EventEmitter, Focusable, Subscription, Task, WeakEntity,
+};
 use itertools::Itertools;
 use language::{Buffer, Capability};
 use multi_buffer::{
@@ -16,6 +18,7 @@ use multi_buffer::{
 use project::Project;
 use rope::Point;
 use settings::DiffViewStyle;
+use smol::future::yield_now;
 use text::{Bias, BufferId, OffsetRangeExt as _, Patch, ToPoint as _};
 use ui::{
     App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _, Render,
@@ -376,6 +379,7 @@ pub struct SplittableEditor {
     split_state: Entity<SplitEditorState>,
     searched_side: Option<SplitSide>,
     _subscriptions: Vec<Subscription>,
+    _split_populate_task: Option<Task<()>>,
 }
 
 struct LhsEditor {
@@ -501,6 +505,7 @@ impl SplittableEditor {
             split_state,
             searched_side: None,
             _subscriptions: subscriptions,
+            _split_populate_task: None,
         }
     }
 
@@ -667,46 +672,11 @@ impl SplittableEditor {
                 .collect()
         };
 
-        let mut companion = Companion::new(
+        let companion = Companion::new(
             rhs_display_map_id,
             convert_rhs_rows_to_lhs,
             convert_lhs_rows_to_rhs,
         );
-
-        // stream this
-        for (path, diff) in path_diffs {
-            self.rhs_multibuffer.update(cx, |rhs_multibuffer, cx| {
-                let sync_result = lhs.multibuffer.update(cx, |lhs_multibuffer, lhs_cx| {
-                    LhsEditor::update_path_excerpts_from_rhs(
-                        path.clone(),
-                        rhs_multibuffer,
-                        lhs_multibuffer,
-                        diff.clone(),
-                        lhs_cx,
-                    )
-                });
-
-                if let Some((lhs_excerpt_ids, rhs_merge_groups)) = sync_result {
-                    let mut final_rhs_ids = Vec::with_capacity(lhs_excerpt_ids.len());
-                    for group in rhs_merge_groups {
-                        if group.len() == 1 {
-                            final_rhs_ids.push(group[0]);
-                        } else {
-                            let merged_id = rhs_multibuffer.merge_excerpts(&group, cx);
-                            final_rhs_ids.push(merged_id);
-                        }
-                    }
-
-                    for (rhs_id, lhs_id) in final_rhs_ids.iter().zip(lhs_excerpt_ids.iter()) {
-                        companion.add_excerpt_mapping(*lhs_id, *rhs_id);
-                    }
-                    let lhs_buffer_id = diff.read(cx).base_text(cx).remote_id();
-                    let rhs_buffer_id = diff.read(cx).buffer_id;
-                    companion.add_buffer_mapping(lhs_buffer_id, rhs_buffer_id);
-                }
-            });
-        }
-
         let companion = cx.new(|_| companion);
 
         rhs_display_map.update(cx, |dm, cx| {
@@ -763,7 +733,87 @@ impl SplittableEditor {
 
         self.lhs = Some(lhs);
 
+        if !path_diffs.is_empty() {
+            self._split_populate_task = Some(cx.spawn(async move |this, cx| {
+                for (path, diff) in path_diffs {
+                    let result = this.update(cx, |this, cx| {
+                        this.populate_lhs_for_path(path, diff, cx);
+                    });
+                    if result.is_err() {
+                        break;
+                    }
+                    yield_now().await;
+                }
+            }));
+        }
+
         cx.notify();
+    }
+
+    fn populate_lhs_for_path(
+        &mut self,
+        path: PathKey,
+        diff: Entity<BufferDiff>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(lhs) = &self.lhs else { return };
+        let rhs_display_map = self.rhs_editor.read(cx).display_map.clone();
+
+        let sync_info = self.rhs_multibuffer.update(cx, |rhs_multibuffer, cx| {
+            let old_rhs_ids: Vec<ExcerptId> = rhs_multibuffer.excerpts_for_path(&path).collect();
+
+            let sync_result = lhs.multibuffer.update(cx, |lhs_multibuffer, lhs_cx| {
+                LhsEditor::sync_path_excerpts(
+                    path,
+                    old_rhs_ids,
+                    rhs_multibuffer,
+                    lhs_multibuffer,
+                    diff.clone(),
+                    &rhs_display_map,
+                    lhs_cx,
+                )
+            });
+
+            sync_result.map(|(lhs_excerpt_ids, rhs_merge_groups)| {
+                let mut final_rhs_ids = Vec::with_capacity(lhs_excerpt_ids.len());
+                for group in rhs_merge_groups {
+                    if group.len() == 1 {
+                        final_rhs_ids.push(group[0]);
+                    } else {
+                        let merged_id = rhs_multibuffer.merge_excerpts(&group, cx);
+                        final_rhs_ids.push(merged_id);
+                    }
+                }
+
+                if let Some(companion) = rhs_display_map.read(cx).companion().cloned() {
+                    let lhs_buffer_id = diff.read(cx).base_text(cx).remote_id();
+                    let rhs_buffer_id = diff.read(cx).buffer_id;
+                    companion.update(cx, |c, _| {
+                        for (rhs_id, lhs_id) in final_rhs_ids.iter().zip(lhs_excerpt_ids.iter()) {
+                            c.add_excerpt_mapping(*lhs_id, *rhs_id);
+                        }
+                        c.add_buffer_mapping(lhs_buffer_id, rhs_buffer_id);
+                    });
+                    Some((final_rhs_ids, rhs_buffer_id, lhs_buffer_id))
+                } else {
+                    None
+                }
+            })
+        });
+
+        if let Some(Some((final_rhs_ids, rhs_buffer_id, lhs_buffer_id))) = sync_info {
+            let rhs_snapshot = self.rhs_multibuffer.read(cx).snapshot(cx);
+
+            rhs_display_map.update(cx, |rhs_dm, cx| {
+                rhs_dm.sync_companion_state_for_excerpts(
+                    &final_rhs_ids,
+                    rhs_buffer_id,
+                    lhs_buffer_id,
+                    &rhs_snapshot,
+                    cx,
+                );
+            });
+        }
     }
 
     fn activate_pane_left(
@@ -967,6 +1017,7 @@ impl SplittableEditor {
     }
 
     fn unsplit(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self._split_populate_task.take();
         let Some(lhs) = self.lhs.take() else {
             return;
         };

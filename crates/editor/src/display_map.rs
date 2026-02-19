@@ -265,6 +265,18 @@ impl Companion {
         self.rhs_display_map_id == display_map_id
     }
 
+    pub(crate) fn has_excerpt_mapping(
+        &self,
+        display_map_id: EntityId,
+        excerpt_id: ExcerptId,
+    ) -> bool {
+        if self.is_rhs(display_map_id) {
+            self.rhs_excerpt_to_lhs_excerpt.contains_key(&excerpt_id)
+        } else {
+            self.lhs_excerpt_to_rhs_excerpt.contains_key(&excerpt_id)
+        }
+    }
+
     pub(crate) fn custom_block_to_balancing_block(
         &self,
         display_map_id: EntityId,
@@ -547,17 +559,23 @@ impl DisplayMap {
 
         companion_display_map.update(cx, |companion_display_map, cx| {
             for my_buffer in self.folded_buffers() {
-                let their_buffer = companion
-                    .read(cx)
-                    .rhs_buffer_to_lhs_buffer
-                    .get(my_buffer)
-                    .unwrap();
-                companion_display_map
-                    .block_map
-                    .folded_buffers
-                    .insert(*their_buffer);
+                if let Some(their_buffer) =
+                    companion.read(cx).rhs_buffer_to_lhs_buffer.get(my_buffer)
+                {
+                    companion_display_map
+                        .block_map
+                        .folded_buffers
+                        .insert(*their_buffer);
+                }
             }
             for block in all_blocks {
+                let excerpt_id = block.placement.start().excerpt_id;
+                if !companion
+                    .read(cx)
+                    .has_excerpt_mapping(self.entity_id, excerpt_id)
+                {
+                    continue;
+                }
                 let Some(their_block) = block_map::balancing_block(
                     &block.properties(),
                     snapshot.buffer(),
@@ -596,6 +614,69 @@ impl DisplayMap {
         });
 
         self.companion = Some((companion_display_map.downgrade(), companion));
+    }
+
+    /// Syncs fold and custom block state from this display map to the companion
+    /// for a set of newly-mapped excerpts. Called incrementally as paths are
+    /// populated during streaming split.
+    pub(crate) fn sync_companion_state_for_excerpts(
+        &self,
+        rhs_excerpt_ids: &[ExcerptId],
+        rhs_buffer_id: BufferId,
+        lhs_buffer_id: BufferId,
+        rhs_snapshot: &MultiBufferSnapshot,
+        cx: &mut App,
+    ) {
+        let Some((companion_display_map_weak, companion)) = &self.companion else {
+            return;
+        };
+        let Some(companion_display_map) = companion_display_map_weak.upgrade() else {
+            return;
+        };
+
+        let rhs_is_folded = self.block_map.folded_buffers.contains(&rhs_buffer_id);
+
+        let rhs_blocks: Vec<_> = self
+            .block_map
+            .blocks_raw()
+            .filter(|block| {
+                let excerpt_id = block.placement.start().excerpt_id;
+                rhs_excerpt_ids.contains(&excerpt_id)
+            })
+            .cloned()
+            .collect();
+
+        let display_map_id = self.entity_id;
+        let companion = companion.clone();
+
+        companion_display_map.update(cx, |companion_dm, cx| {
+            if rhs_is_folded {
+                companion_dm.block_map.folded_buffers.insert(lhs_buffer_id);
+            }
+
+            if !rhs_blocks.is_empty() {
+                let lhs_snapshot = companion_dm.buffer.read(cx).snapshot(cx);
+                for block in &rhs_blocks {
+                    let Some(their_block) = block_map::balancing_block(
+                        &block.properties(),
+                        rhs_snapshot,
+                        &lhs_snapshot,
+                        display_map_id,
+                        companion.read(cx),
+                    ) else {
+                        continue;
+                    };
+                    let their_id = companion_dm
+                        .block_map
+                        .insert_block_raw(their_block, &lhs_snapshot);
+                    companion.update(cx, |c, _cx| {
+                        c.custom_block_to_balancing_block(display_map_id)
+                            .borrow_mut()
+                            .insert(block.id, their_id);
+                    });
+                }
+            }
+        });
     }
 
     pub(crate) fn companion(&self) -> Option<&Entity<Companion>> {
