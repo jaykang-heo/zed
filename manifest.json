@@ -197,6 +197,12 @@
       "title": "agent_ui: Fix max tokens error not being shown",
       "file": "suggestions/PR-49098.md",
       "date": "2026-02-13T13:32:31Z"
+    },
+    {
+      "pr": 49622,
+      "title": "Add gemini-3.1-pro-preview model",
+      "file": "suggestions/PR-49622.md",
+      "date": "2026-02-19T18:21:25Z"
     }
   ]
 }
