@@ -27,7 +27,7 @@ pub fn init(client: Arc<Client>, cx: &mut App) {
     cx.on_flags_ready({
         let client = client.clone();
         move |flags_ready, cx| {
-            if dbg!(flags_ready.is_staff) {
+            if flags_ready.is_staff {
                 let client = client.clone();
                 cx.background_spawn(async move {
                     upload_build_timings(client).await.warn_on_err();
@@ -417,7 +417,7 @@ async fn upload_build_timings(_client: Arc<Client>) -> Result<()> {
 
     let mut entries = smol::fs::read_dir(&build_timings_dir).await?;
     while let Some(entry) = entries.next().await {
-        let entry = dbg!(entry)?;
+        let entry = entry?;
         let path = entry.path();
 
         if path.extension() != Some(OsStr::new("json")) {
