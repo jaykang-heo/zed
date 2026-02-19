@@ -1139,16 +1139,56 @@ impl Render for Sidebar {
                             }))
                     })
                     .child(
-                        IconButton::new("new-workspace", IconName::Plus)
-                            .icon_size(IconSize::Small)
-                            .tooltip(|_window, cx| {
-                                Tooltip::for_action("New Workspace", &NewWorkspaceInWindow, cx)
-                            })
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.multi_workspace.update(cx, |multi_workspace, cx| {
-                                    multi_workspace.create_workspace(window, cx);
-                                });
-                            })),
+                        h_flex()
+                            .gap_0p5()
+                            .child(
+                                IconButton::new("new-workspace", IconName::Plus)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(|_window, cx| {
+                                        Tooltip::for_action(
+                                            "New Workspace",
+                                            &NewWorkspaceInWindow,
+                                            cx,
+                                        )
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.multi_workspace.update(cx, |multi_workspace, cx| {
+                                            multi_workspace.create_workspace(window, cx);
+                                        });
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .rounded_md()
+                                    .bg(gpui::hsla(300.0 / 360.0, 1.0, 0.5, 0.2))
+                                    .child(
+                                        IconButton::new(
+                                            "debug-shared-project-workspace",
+                                            IconName::Plus,
+                                        )
+                                        .icon_size(IconSize::Small)
+                                        .icon_color(Color::Custom(gpui::hsla(
+                                            300.0 / 360.0,
+                                            1.0,
+                                            0.5,
+                                            1.0,
+                                        )))
+                                        .tooltip(Tooltip::text(
+                                            "DEBUG: New Workspace (Shared Project)",
+                                        ))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.multi_workspace.update(
+                                                cx,
+                                                |multi_workspace, cx| {
+                                                    multi_workspace
+                                                        .debug_create_workspace_with_shared_project(
+                                                            window, cx,
+                                                        );
+                                                },
+                                            );
+                                        })),
+                                    ),
+                            ),
                     ),
             )
             .child(self.picker.clone())

@@ -558,6 +558,80 @@ impl MultiWorkspace {
         }));
     }
 
+    pub fn debug_create_workspace_with_shared_project(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.multi_workspace_enabled(cx) {
+            return;
+        }
+        let (app_state, project) = {
+            let active_workspace = self.workspace().read(cx);
+            (
+                active_workspace.app_state().clone(),
+                active_workspace.project().clone(),
+            )
+        };
+
+        let new_workspace = cx.new(|cx| Workspace::new(None, project, app_state, window, cx));
+        self.set_active_workspace(new_workspace.clone(), cx);
+        self.focus_active_workspace(window, cx);
+
+        let weak_workspace = new_workspace.downgrade();
+        self._create_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = crate::persistence::DB.next_id().await;
+            this.update_in(cx, |this, window, cx| match result {
+                Ok(workspace_id) => {
+                    if let Some(workspace) = weak_workspace.upgrade() {
+                        let session_id = workspace.read(cx).session_id();
+                        let window_id = window.window_handle().window_id().as_u64();
+                        workspace.update(cx, |workspace, _cx| {
+                            workspace.set_database_id(workspace_id);
+                        });
+                        cx.background_spawn(async move {
+                            crate::persistence::DB
+                                .set_session_binding(workspace_id, session_id, Some(window_id))
+                                .await
+                                .log_err();
+                        })
+                        .detach();
+                    } else {
+                        cx.background_spawn(async move {
+                            crate::persistence::DB
+                                .delete_workspace_by_id(workspace_id)
+                                .await
+                                .log_err();
+                        })
+                        .detach();
+                    }
+                    this.serialize(cx);
+                }
+                Err(error) => {
+                    log::error!("Failed to create shared-project workspace: {error:#}");
+                    if let Some(index) = weak_workspace
+                        .upgrade()
+                        .and_then(|w| this.workspaces.iter().position(|ws| *ws == w))
+                    {
+                        this.remove_workspace(index, window, cx);
+                    }
+                    this.workspace().update(cx, |workspace, cx| {
+                        let id = NotificationId::unique::<MultiWorkspace>();
+                        workspace.show_toast(
+                            Toast::new(
+                                id,
+                                format!("Failed to create shared-project workspace: {error}"),
+                            ),
+                            cx,
+                        );
+                    });
+                }
+            })
+            .log_err();
+        }));
+    }
+
+
     pub fn remove_workspace(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.workspaces.len() <= 1 || index >= self.workspaces.len() {
             return;

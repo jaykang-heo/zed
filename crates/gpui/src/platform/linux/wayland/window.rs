@@ -557,9 +557,13 @@ impl WaylandWindowStatePtr {
         state.resize_throttle = false;
         drop(state);
 
-        let mut cb = self.callbacks.borrow_mut();
-        if let Some(fun) = cb.request_frame.as_mut() {
+        let taken = self.callbacks.borrow_mut().request_frame.take();
+        if let Some(mut fun) = taken {
             fun(Default::default());
+            let mut cb = self.callbacks.borrow_mut();
+            if cb.request_frame.is_none() {
+                cb.request_frame = Some(fun);
+            }
         }
     }
 
@@ -571,9 +575,13 @@ impl WaylandWindowStatePtr {
                     state.window_controls = window_controls;
 
                     drop(state);
-                    let mut callbacks = self.callbacks.borrow_mut();
-                    if let Some(appearance_changed) = callbacks.appearance_changed.as_mut() {
+                    let taken = self.callbacks.borrow_mut().appearance_changed.take();
+                    if let Some(mut appearance_changed) = taken {
                         appearance_changed();
+                        let mut cb = self.callbacks.borrow_mut();
+                        if cb.appearance_changed.is_none() {
+                            cb.appearance_changed = Some(appearance_changed);
+                        }
                     }
                 }
             }
@@ -642,19 +650,25 @@ impl WaylandWindowStatePtr {
             match mode {
                 WEnum::Value(zxdg_toplevel_decoration_v1::Mode::ServerSide) => {
                     self.state.borrow_mut().decorations = WindowDecorations::Server;
-                    if let Some(mut appearance_changed) =
-                        self.callbacks.borrow_mut().appearance_changed.as_mut()
-                    {
+                    let taken = self.callbacks.borrow_mut().appearance_changed.take();
+                    if let Some(mut appearance_changed) = taken {
                         appearance_changed();
+                        let mut cb = self.callbacks.borrow_mut();
+                        if cb.appearance_changed.is_none() {
+                            cb.appearance_changed = Some(appearance_changed);
+                        }
                     }
                 }
                 WEnum::Value(zxdg_toplevel_decoration_v1::Mode::ClientSide) => {
                     self.state.borrow_mut().decorations = WindowDecorations::Client;
                     // Update background to be transparent
-                    if let Some(mut appearance_changed) =
-                        self.callbacks.borrow_mut().appearance_changed.as_mut()
-                    {
+                    let taken = self.callbacks.borrow_mut().appearance_changed.take();
+                    if let Some(mut appearance_changed) = taken {
                         appearance_changed();
+                        let mut cb = self.callbacks.borrow_mut();
+                        if cb.appearance_changed.is_none() {
+                            cb.appearance_changed = Some(appearance_changed);
+                        }
                     }
                 }
                 WEnum::Value(_) => {
@@ -736,10 +750,13 @@ impl WaylandWindowStatePtr {
                 false
             }
             xdg_toplevel::Event::Close => {
-                let mut cb = self.callbacks.borrow_mut();
-                if let Some(mut should_close) = cb.should_close.take() {
+                let taken = self.callbacks.borrow_mut().should_close.take();
+                if let Some(mut should_close) = taken {
                     let result = (should_close)();
-                    cb.should_close = Some(should_close);
+                    let mut cb = self.callbacks.borrow_mut();
+                    if cb.should_close.is_none() {
+                        cb.should_close = Some(should_close);
+                    }
                     if result {
                         drop(cb);
                         self.close();
@@ -926,8 +943,13 @@ impl WaylandWindowStatePtr {
             (state.bounds.size, state.scale)
         };
 
-        if let Some(ref mut fun) = self.callbacks.borrow_mut().resize {
+        let taken = self.callbacks.borrow_mut().resize.take();
+        if let Some(mut fun) = taken {
             fun(size, scale);
+            let mut cb = self.callbacks.borrow_mut();
+            if cb.resize.is_none() {
+                cb.resize = Some(fun);
+            }
         }
 
         {
@@ -962,8 +984,8 @@ impl WaylandWindowStatePtr {
                 child.close();
             }
         }
-        let mut callbacks = self.callbacks.borrow_mut();
-        if let Some(fun) = callbacks.close.take() {
+        let close_cb = self.callbacks.borrow_mut().close.take();
+        if let Some(fun) = close_cb {
             fun()
         }
     }
@@ -972,10 +994,13 @@ impl WaylandWindowStatePtr {
         if self.is_blocked() {
             return;
         }
-        if let Some(ref mut fun) = self.callbacks.borrow_mut().input
-            && !fun(input.clone()).propagate
-        {
-            return;
+        let taken = self.callbacks.borrow_mut().input.take();
+        if let Some(mut fun) = taken {
+            let result = fun(input.clone());
+            self.callbacks.borrow_mut().input = Some(fun);
+            if !result.propagate {
+                return;
+            }
         }
         if let PlatformInput::KeyDown(event) = input
             && event.keystroke.modifiers.is_subset_of(&Modifiers::shift())
@@ -992,23 +1017,37 @@ impl WaylandWindowStatePtr {
 
     pub fn set_focused(&self, focus: bool) {
         self.state.borrow_mut().active = focus;
-        if let Some(ref mut fun) = self.callbacks.borrow_mut().active_status_change {
+        let taken = self.callbacks.borrow_mut().active_status_change.take();
+        if let Some(mut fun) = taken {
             fun(focus);
+            let mut cb = self.callbacks.borrow_mut();
+            if cb.active_status_change.is_none() {
+                cb.active_status_change = Some(fun);
+            }
         }
     }
 
     pub fn set_hovered(&self, focus: bool) {
-        if let Some(ref mut fun) = self.callbacks.borrow_mut().hover_status_change {
+        let taken = self.callbacks.borrow_mut().hover_status_change.take();
+        if let Some(mut fun) = taken {
             fun(focus);
+            let mut cb = self.callbacks.borrow_mut();
+            if cb.hover_status_change.is_none() {
+                cb.hover_status_change = Some(fun);
+            }
         }
     }
 
     pub fn set_appearance(&mut self, appearance: WindowAppearance) {
         self.state.borrow_mut().appearance = appearance;
 
-        let mut callbacks = self.callbacks.borrow_mut();
-        if let Some(ref mut fun) = callbacks.appearance_changed {
-            (fun)()
+        let taken = self.callbacks.borrow_mut().appearance_changed.take();
+        if let Some(mut fun) = taken {
+            fun();
+            let mut cb = self.callbacks.borrow_mut();
+            if cb.appearance_changed.is_none() {
+                cb.appearance_changed = Some(fun);
+            }
         }
     }
 

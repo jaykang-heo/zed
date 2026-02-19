@@ -921,10 +921,13 @@ impl X11Window {
 
 impl X11WindowStatePtr {
     pub fn should_close(&self) -> bool {
-        let mut cb = self.callbacks.borrow_mut();
-        if let Some(mut should_close) = cb.should_close.take() {
+        let taken = self.callbacks.borrow_mut().should_close.take();
+        if let Some(mut should_close) = taken {
             let result = (should_close)();
-            cb.should_close = Some(should_close);
+            let mut cb = self.callbacks.borrow_mut();
+            if cb.should_close.is_none() {
+                cb.should_close = Some(should_close);
+            }
             result
         } else {
             true
@@ -1039,16 +1042,20 @@ impl X11WindowStatePtr {
             }
         }
 
-        let mut callbacks = self.callbacks.borrow_mut();
-        if let Some(fun) = callbacks.close.take() {
+        let close_cb = self.callbacks.borrow_mut().close.take();
+        if let Some(fun) = close_cb {
             fun()
         }
     }
 
     pub fn refresh(&self, request_frame_options: RequestFrameOptions) {
-        let mut cb = self.callbacks.borrow_mut();
-        if let Some(ref mut fun) = cb.request_frame {
+        let taken = self.callbacks.borrow_mut().request_frame.take();
+        if let Some(mut fun) = taken {
             fun(request_frame_options);
+            let mut cb = self.callbacks.borrow_mut();
+            if cb.request_frame.is_none() {
+                cb.request_frame = Some(fun);
+            }
         }
     }
 
@@ -1056,10 +1063,13 @@ impl X11WindowStatePtr {
         if self.is_blocked() {
             return;
         }
-        if let Some(ref mut fun) = self.callbacks.borrow_mut().input
-            && !fun(input.clone()).propagate
-        {
-            return;
+        let taken = self.callbacks.borrow_mut().input.take();
+        if let Some(mut fun) = taken {
+            let result = fun(input.clone());
+            self.callbacks.borrow_mut().input = Some(fun);
+            if !result.propagate {
+                return;
+            }
         }
         if let PlatformInput::KeyDown(event) = input {
             // only allow shift modifier when inserting text
@@ -1177,29 +1187,50 @@ impl X11WindowStatePtr {
             }
         }
 
-        let mut callbacks = self.callbacks.borrow_mut();
-        if let Some((content_size, scale_factor)) = resize_args
-            && let Some(ref mut fun) = callbacks.resize
-        {
-            fun(content_size, scale_factor)
+        if let Some((content_size, scale_factor)) = resize_args {
+            let taken = self.callbacks.borrow_mut().resize.take();
+            if let Some(mut fun) = taken {
+                fun(content_size, scale_factor);
+                let mut cb = self.callbacks.borrow_mut();
+                if cb.resize.is_none() {
+                    cb.resize = Some(fun);
+                }
+            }
         }
 
-        if !is_resize && let Some(ref mut fun) = callbacks.moved {
-            fun();
+        if !is_resize {
+            let taken = self.callbacks.borrow_mut().moved.take();
+            if let Some(mut fun) = taken {
+                fun();
+                let mut cb = self.callbacks.borrow_mut();
+                if cb.moved.is_none() {
+                    cb.moved = Some(fun);
+                }
+            }
         }
 
         Ok(())
     }
 
     pub fn set_active(&self, focus: bool) {
-        if let Some(ref mut fun) = self.callbacks.borrow_mut().active_status_change {
+        let taken = self.callbacks.borrow_mut().active_status_change.take();
+        if let Some(mut fun) = taken {
             fun(focus);
+            let mut cb = self.callbacks.borrow_mut();
+            if cb.active_status_change.is_none() {
+                cb.active_status_change = Some(fun);
+            }
         }
     }
 
     pub fn set_hovered(&self, focus: bool) {
-        if let Some(ref mut fun) = self.callbacks.borrow_mut().hovered_status_change {
+        let taken = self.callbacks.borrow_mut().hovered_status_change.take();
+        if let Some(mut fun) = taken {
             fun(focus);
+            let mut cb = self.callbacks.borrow_mut();
+            if cb.hovered_status_change.is_none() {
+                cb.hovered_status_change = Some(fun);
+            }
         }
     }
 
@@ -1210,9 +1241,13 @@ impl X11WindowStatePtr {
         state.renderer.update_transparency(is_transparent);
         state.appearance = appearance;
         drop(state);
-        let mut callbacks = self.callbacks.borrow_mut();
-        if let Some(ref mut fun) = callbacks.appearance_changed {
-            (fun)()
+        let taken = self.callbacks.borrow_mut().appearance_changed.take();
+        if let Some(mut fun) = taken {
+            fun();
+            let mut cb = self.callbacks.borrow_mut();
+            if cb.appearance_changed.is_none() {
+                cb.appearance_changed = Some(fun);
+            }
         }
     }
 }
