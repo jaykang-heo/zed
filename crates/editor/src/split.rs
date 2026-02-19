@@ -1020,6 +1020,7 @@ impl SplittableEditor {
                 vec![(path.clone(), diff.clone())],
                 cx,
                 |rhs_multibuffer, cx| {
+                    dbg!(">>>>>>>>>>>");
                     let (anchors, added_a_new_excerpt) = rhs_multibuffer.set_excerpts_for_path(
                         path.clone(),
                         buffer.clone(),
@@ -1027,6 +1028,7 @@ impl SplittableEditor {
                         context_line_count,
                         cx,
                     );
+                    dbg!("<<<<<<<<<<<<<");
                     if !anchors.is_empty()
                         && rhs_multibuffer
                             .diff_for(buffer.read(cx).remote_id())

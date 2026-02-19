@@ -1798,6 +1798,7 @@ impl MultiBuffer {
     ) where
         O: text::ToOffset,
     {
+        dbg!(prev_excerpt_id);
         assert_eq!(self.history.transaction_depth(), 0);
         let mut ranges = ranges.into_iter().peekable();
         if ranges.peek().is_none() {
@@ -1853,6 +1854,7 @@ impl MultiBuffer {
         let mut excerpts = Vec::new();
         let buffer_snapshot = Arc::new(buffer_snapshot);
         while let Some((id, range)) = ranges.next() {
+            dbg!(&id);
             let locator = Locator::between(&prev_locator, &next_locator);
             if let Err(ix) = buffer_state.excerpts.binary_search(&locator) {
                 buffer_state.excerpts.insert(ix, locator.clone());

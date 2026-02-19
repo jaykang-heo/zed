@@ -353,6 +353,7 @@ impl MultiBuffer {
             } else {
                 None
             };
+            dbg!(&existing);
 
             let new = new_iter.peek();
             // Try to merge the next new range or existing excerpt into the last
