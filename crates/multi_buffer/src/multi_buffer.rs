@@ -5384,11 +5384,10 @@ impl MultiBufferSnapshot {
 
             if let Some(excerpt) = item {
                 if excerpt.id != excerpt_id && excerpt_id != ExcerptId::max() {
-                    return self.resolve_summary_for_anchor(
+                    return self.resolve_summary_for_min_or_max_anchor(
                         &Anchor::min(),
                         excerpt_start_position,
                         &mut diff_transforms_cursor,
-                        None,
                     );
                 }
                 let excerpt_buffer_start = excerpt
@@ -5417,15 +5416,14 @@ impl MultiBufferSnapshot {
                     &anchor,
                     position,
                     &mut diff_transforms_cursor,
-                    Some(&excerpt.buffer),
+                    &excerpt.buffer,
                 )
             } else {
                 diff_transforms_cursor.seek_forward(&excerpt_start_position, Bias::Left);
-                self.resolve_summary_for_anchor(
+                self.resolve_summary_for_min_or_max_anchor(
                     &Anchor::max(),
                     excerpt_start_position,
                     &mut diff_transforms_cursor,
-                    None,
                 )
             }
         }
@@ -5442,7 +5440,7 @@ impl MultiBufferSnapshot {
             DiffTransform,
             Dimensions<ExcerptDimension<MBD>, OutputDimension<MBD>>,
         >,
-        excerpt_buffer: Option<&text::BufferSnapshot>,
+        excerpt_buffer: &text::BufferSnapshot,
     ) -> MBD
     where
         MBD: MultiBufferDimension + Ord + Sub + AddAssign<<MBD as Sub>::Output>,
@@ -5454,7 +5452,7 @@ impl MultiBufferSnapshot {
 
             // A right-biased anchor at a transform boundary belongs to the
             // *next* transform, so advance past the current one.
-            if at_transform_end && anchor.text_anchor.bias == Bias::Right {
+            if anchor.text_anchor.bias == Bias::Right && at_transform_end {
                 diff_transforms.next();
                 continue;
             }
@@ -5490,10 +5488,9 @@ impl MultiBufferSnapshot {
                             continue;
                         }
                     } else if at_transform_end
-                        && let Some(buffer) = excerpt_buffer
                         && anchor
                             .text_anchor
-                            .cmp(&hunk_info.hunk_start_anchor, buffer)
+                            .cmp(&hunk_info.hunk_start_anchor, excerpt_buffer)
                             .is_gt()
                     {
                         // The anchor has no (valid) diff-base position, so it
@@ -5520,6 +5517,41 @@ impl MultiBufferSnapshot {
                     let overshoot = excerpt_position - diff_transforms.start().0;
                     position += overshoot;
                 }
+            }
+
+            return position.0;
+        }
+    }
+
+    /// Like `resolve_summary_for_anchor` but optimized for min/max anchors.
+    fn resolve_summary_for_min_or_max_anchor<MBD>(
+        &self,
+        anchor: &Anchor,
+        excerpt_position: ExcerptDimension<MBD>,
+        diff_transforms: &mut Cursor<
+            DiffTransform,
+            Dimensions<ExcerptDimension<MBD>, OutputDimension<MBD>>,
+        >,
+    ) -> MBD
+    where
+        MBD: MultiBufferDimension + Ord + Sub + AddAssign<<MBD as Sub>::Output>,
+    {
+        loop {
+            let transform_end_position = diff_transforms.end().0;
+            let item = diff_transforms.item();
+            let at_transform_end = transform_end_position == excerpt_position && item.is_some();
+
+            // A right-biased anchor at a transform boundary belongs to the
+            // *next* transform, so advance past the current one.
+            if anchor.text_anchor.bias == Bias::Right && at_transform_end {
+                diff_transforms.next();
+                continue;
+            }
+
+            let mut position = diff_transforms.start().1;
+            if let Some(DiffTransform::BufferContent { .. }) | None = item {
+                let overshoot = excerpt_position - diff_transforms.start().0;
+                position += overshoot;
             }
 
             return position.0;
@@ -5596,11 +5628,10 @@ impl MultiBufferSnapshot {
             let excerpt_start_position = ExcerptDimension(MBD::from_summary(&cursor.start().text));
             if let Some(excerpt) = cursor.item() {
                 if excerpt.id != excerpt_id && excerpt_id != ExcerptId::max() {
-                    let position = self.resolve_summary_for_anchor(
+                    let position = self.resolve_summary_for_min_or_max_anchor(
                         &Anchor::min(),
                         excerpt_start_position,
                         &mut diff_transforms_cursor,
-                        None,
                     );
                     summaries.extend(excerpt_anchors.map(|_| position));
                     continue;
@@ -5635,16 +5666,15 @@ impl MultiBufferSnapshot {
                         anchor,
                         position,
                         &mut diff_transforms_cursor,
-                        Some(&excerpt.buffer),
+                        &excerpt.buffer,
                     ));
                 }
             } else {
                 diff_transforms_cursor.seek_forward(&excerpt_start_position, Bias::Left);
-                let position = self.resolve_summary_for_anchor(
+                let position = self.resolve_summary_for_min_or_max_anchor(
                     &Anchor::max(),
                     excerpt_start_position,
                     &mut diff_transforms_cursor,
-                    None,
                 );
                 summaries.extend(excerpt_anchors.map(|_| position));
             }

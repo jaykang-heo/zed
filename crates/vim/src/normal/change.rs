@@ -716,7 +716,11 @@ mod test {
         "};
 
         cx.set_state(
-            &format!("fn main() {{\n    ˇprintln!(\"new\");\n}}\n"),
+            indoc! {"
+                fn main() {
+                    ˇprintln!(\"new\");
+                }
+            "},
             Mode::Normal,
         );
         cx.set_head_text(diff_base);
