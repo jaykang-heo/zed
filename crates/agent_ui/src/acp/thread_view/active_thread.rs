@@ -2918,7 +2918,7 @@ impl AcpThreadView {
         }
 
         let thread = self.as_native_thread(cx)?.read(cx);
-        let model = thread.model()?;
+        let _model = thread.model()?;
 
         // TODO: restore this guard after testing fast mode
         // if !model.supports_fast_mode() {
