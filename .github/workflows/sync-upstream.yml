@@ -1,0 +1,55 @@
+name: Sync Upstream Zed
+
+on:
+  schedule:
+    - cron: '0 9 * * 1'  # 매주 월요일 오전 9시 (UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Sync upstream
+        run: |
+          git remote add upstream https://github.com/zed-industries/zed.git || true
+          git fetch upstream main
+          git merge upstream/main --no-edit
+
+      - name: Push to main
+        run: git push origin main
+
+      - name: Check dev/leo rebase
+        id: rebase-check
+        continue-on-error: true
+        run: |
+          git checkout dev/leo
+          git rebase main
+          git push origin dev/leo --force-with-lease
+
+      - name: Create PR on conflict
+        if: steps.rebase-check.outcome == 'failure'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          title: "Upstream sync conflict - manual rebase needed"
+          body: |
+            upstream/main을 main에 머지했으나, dev/leo rebase에서 충돌 발생.
+            수동으로 해결 필요:
+            ```
+            git fetch origin
+            git checkout dev/leo
+            git rebase origin/main
+            # 충돌 해결
+            git push --force-with-lease
+            ```
+          branch: sync/upstream-conflict
+          base: dev/leo
