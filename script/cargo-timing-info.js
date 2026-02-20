@@ -72,7 +72,7 @@ function parseTimestampFromFilename(filePath) {
   return `${year}-${month}-${day}T${hour}:${minute}:${second}.${milliseconds.toString().padStart(3, "0")}Z`;
 }
 
-function writeBuildTimingJson(filePath, durationMs, firstCrate, target, lockWaitMs) {
+function writeBuildTimingJson(filePath, durationMs, firstCrate, target, lockWaitMs, command) {
   const buildTimingsDir = path.join(getZedDataDir(), "build-timings");
 
   // Create directory if it doesn't exist
@@ -93,6 +93,7 @@ function writeBuildTimingJson(filePath, durationMs, firstCrate, target, lockWait
     first_crate: firstCrate,
     target: target,
     lock_wait_ms: lockWaitMs,
+    command: command,
   };
 
   const jsonPath = path.join(buildTimingsDir, `build-timing-${startedAt}.json`);
@@ -100,7 +101,7 @@ function writeBuildTimingJson(filePath, durationMs, firstCrate, target, lockWait
   console.log(`\nWrote build timing JSON to: ${jsonPath}`);
 }
 
-function analyzeTimings(filePath) {
+function analyzeTimings(filePath, command) {
   // Read the file
   const htmlContent = fs.readFileSync(filePath, "utf-8");
 
@@ -154,14 +155,14 @@ function analyzeTimings(filePath) {
   const lockWaitMs = lockWaitTime * 1000;
   const firstCrateName = firstRebuilt.name;
   const targetName = lastBuilding.name;
-  writeBuildTimingJson(filePath, durationMs, firstCrateName, targetName, lockWaitMs);
+  writeBuildTimingJson(filePath, durationMs, firstCrateName, targetName, lockWaitMs, command);
 }
 
 // Main execution
 const args = process.argv.slice(2);
 
 if (args.length === 0) {
-  console.error("Usage: cargo-timing-info.js <path-to-cargo-timing.html>");
+  console.error("Usage: cargo-timing-info.js <path-to-cargo-timing.html> [command]");
   console.error("");
   console.error("Example:");
   console.error("  cargo-timing-info.js target/cargo-timings/cargo-timing-20260219T161555.879263Z.html");
@@ -169,6 +170,7 @@ if (args.length === 0) {
 }
 
 const filePath = args[0];
+const command = args[1] || null;
 
 if (!fs.existsSync(filePath)) {
   console.error(`Error: File not found: ${filePath}`);
@@ -176,7 +178,7 @@ if (!fs.existsSync(filePath)) {
 }
 
 try {
-  analyzeTimings(filePath);
+  analyzeTimings(filePath, command);
 } catch (e) {
   console.error(`Error: ${e.message}`);
   process.exit(1);

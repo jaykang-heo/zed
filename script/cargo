@@ -20,7 +20,20 @@ const os = require("os");
 const path = require("path");
 const readline = require("readline");
 
-const SUBCOMMANDS_WITH_TIMINGS = new Set(["build", "run", "test"]);
+const SUBCOMMANDS_WITH_TIMINGS = new Set(["build", "check", "run", "test"]);
+
+// Built-in cargo aliases
+const CARGO_ALIASES = {
+  b: "build",
+  c: "check",
+  t: "test",
+  r: "run",
+  d: "doc",
+};
+
+function expandAlias(subcommand) {
+  return CARGO_ALIASES[subcommand] || subcommand;
+}
 const LOCK_WAIT_REGEX = /Blocking waiting for file lock on (.+)/;
 
 function detectShell() {
@@ -209,7 +222,8 @@ async function main() {
 
   const cargoCmd = process.env.CARGO || "cargo";
   const subcommandInfo = findSubcommand(args);
-  const shouldAddTimings = subcommandInfo && SUBCOMMANDS_WITH_TIMINGS.has(subcommandInfo.subcommand);
+  const expandedSubcommand = subcommandInfo ? expandAlias(subcommandInfo.subcommand) : null;
+  const shouldAddTimings = expandedSubcommand && SUBCOMMANDS_WITH_TIMINGS.has(expandedSubcommand);
 
   // Build the final args array
   let finalArgs = [...args];
@@ -246,7 +260,7 @@ async function main() {
       const timingScript = path.join(scriptDir, "cargo-timing-info.js");
 
       if (fs.existsSync(timingScript)) {
-        const timingChild = spawn(process.execPath, [timingScript, timingFile], {
+        const timingChild = spawn(process.execPath, [timingScript, timingFile, `cargo ${expandedSubcommand}`], {
           detached: true,
           stdio: "ignore",
         });

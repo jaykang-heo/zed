@@ -398,8 +398,14 @@ struct BuildTiming {
     first_crate: String,
     target: String,
     lock_wait_ms: f32,
+    command: String,
 }
 
+// NOTE: this is a bit of a hack. We want to be able to have internal
+// metrics around build times, but we don't have an easy way to authenticate
+// users - except - we know internal users use Zed.
+// So, we have it upload the timings on their behalf, it'd be better to do
+// this more directly in ./script/cargo-timing-info.js.
 async fn upload_build_timings(_client: Arc<Client>) -> Result<()> {
     let build_timings_dir = paths::data_dir().join("build-timings");
 
@@ -447,6 +453,7 @@ async fn upload_build_timings(_client: Arc<Client>) -> Result<()> {
             first_crate = timing.first_crate,
             target = timing.target,
             lock_wait_ms = timing.lock_wait_ms,
+            command = timing.command,
             cpu_count = cpu_count,
             ram_size_gb = ram_size_gb
         );
