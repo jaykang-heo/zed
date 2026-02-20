@@ -2051,14 +2051,15 @@ fn selection_ranges(
         selections
             .into_iter()
             .map(|s| {
-                if s.is_empty() {
+                let (start, end) = if s.is_empty() {
                     let row = multi_buffer::MultiBufferRow(s.start.row);
                     let line_start = text::Point::new(s.start.row, 0);
                     let line_end = text::Point::new(s.start.row, snapshot.line_len(row));
-                    snapshot.anchor_after(line_start)..snapshot.anchor_before(line_end)
+                    (line_start, line_end)
                 } else {
-                    snapshot.anchor_after(s.start)..snapshot.anchor_before(s.end)
-                }
+                    (s.start, s.end)
+                };
+                snapshot.anchor_after(start)..snapshot.anchor_before(end)
             })
             .flat_map(|range| {
                 let (start_buffer, start) = buffer.text_anchor_for_position(range.start, cx)?;
