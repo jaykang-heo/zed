@@ -407,7 +407,7 @@ struct BuildTiming {
 // So, we have it upload the timings on their behalf, it'd be better to do
 // this more directly in ./script/cargo-timing-info.js.
 async fn upload_build_timings(_client: Arc<Client>) -> Result<()> {
-    let build_timings_dir = paths::data_dir().join("build-timings");
+    let build_timings_dir = paths::data_dir().join("build_timings");
 
     if !build_timings_dir.exists() {
         return Ok(());

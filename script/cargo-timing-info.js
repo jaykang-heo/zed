@@ -73,7 +73,7 @@ function parseTimestampFromFilename(filePath) {
 }
 
 function writeBuildTimingJson(filePath, durationMs, firstCrate, target, lockWaitMs, command) {
-  const buildTimingsDir = path.join(getZedDataDir(), "build-timings");
+  const buildTimingsDir = path.join(getZedDataDir(), "build_timings");
 
   // Create directory if it doesn't exist
   if (!fs.existsSync(buildTimingsDir)) {
