@@ -1699,10 +1699,11 @@ impl EditPredictionStore {
                 | EditPredictionProvider::Experimental(_) => (true, 2),
                 EditPredictionProvider::Ollama => (false, 1),
                 EditPredictionProvider::OpenAiCompatibleApi => (false, 2),
+                // These providers don't support diagnostics-driven predictions.
                 EditPredictionProvider::None
                 | EditPredictionProvider::Copilot
                 | EditPredictionProvider::Supermaven
-                | EditPredictionProvider::Codestral => unreachable!(),
+                | EditPredictionProvider::Codestral => return,
             };
 
         let drop_on_cancel = !needs_acceptance_tracking;
