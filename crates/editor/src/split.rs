@@ -2037,7 +2037,8 @@ impl LhsEditor {
             base_text_buffer_snapshot = base_text_buffer.snapshot();
             remote_id = base_text_buffer.remote_id();
         }
-        let new = rhs_multibuffer
+
+        let new_ranges = rhs_multibuffer
             .excerpts_for_buffer(main_buffer.remote_id(), lhs_cx)
             .into_iter()
             .map(|(_, excerpt_range)| {
@@ -2067,7 +2068,7 @@ impl LhsEditor {
             path_key,
             diff.read(lhs_cx).base_text_buffer().clone(),
             &base_text_buffer_snapshot,
-            new,
+            new_ranges,
             lhs_cx,
         );
         if !lhs_result.excerpt_ids.is_empty()

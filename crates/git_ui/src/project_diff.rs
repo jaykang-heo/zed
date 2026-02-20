@@ -780,10 +780,12 @@ impl ProjectDiff {
     ) -> Result<()> {
         let mut path_keys = Vec::new();
         let buffers_to_load = this.update(cx, |this, cx| {
+            // REPRO: 1. buffers_to_load, has (FileStatus::tracked, "/test.txt")
             let (repo, buffers_to_load) = this.branch_diff.update(cx, |branch_diff, cx| {
                 let load_buffers = branch_diff.load_buffers(cx);
                 (branch_diff.repo().cloned(), load_buffers)
             });
+            // REPRO: 2. previous_paths, has (FileStatus::conflict, "/test.txt")
             let mut previous_paths = this
                 .multibuffer
                 .read(cx)
@@ -796,20 +798,42 @@ impl ProjectDiff {
 
                 path_keys = Vec::with_capacity(buffers_to_load.len());
                 for entry in buffers_to_load.iter() {
+                    // REPRO: FileStatus::tracked (with these settings) has a sort_prefix of 1
+                    // REPRO: But FileStatus::conflict (with these settings) has a sort_prefix of 2
+                    // REPRO: note: hard to actually determine true values here due to settings
                     let sort_prefix = sort_prefix(&repo, &entry.repo_path, entry.file_status, cx);
                     let path_key =
                         PathKey::with_sort_prefix(sort_prefix, entry.repo_path.as_ref().clone());
-                    previous_paths.remove(&path_key);
+
+                    // // new (correct)
+                    // let mut previous_path_key = None;
+                    // {
+                    //     for previous_path_key_ix in &previous_paths {
+                    //         if previous_path_key_ix.path == path_key.path {
+                    //             previous_path_key = Some(previous_path_key_ix.clone());
+                    //         }
+                    //     }
+                    // }
+                    // if let Some(previous_path_key) = previous_path_key {
+                    //     previous_paths.remove(&previous_path_key);
+                    // }
+                    // end
+
+                    previous_paths.remove(&path_key); // Preivous paths has MORE paths than it should.
+                    // REPRO: With the data from "REPRO" above, previous_paths will have (FileStatus::tracked, "/test.txt"), when it should be empty
+
                     path_keys.push(path_key)
                 }
             }
 
             this.editor.update(cx, |editor, cx| {
+                // [(FileStatus::tracked, "/test.txt")]
                 for path in previous_paths {
                     if let Some(buffer) = this.multibuffer.read(cx).buffer_for_path(&path, cx) {
                         let skip = match reason {
                             RefreshReason::DiffChanged | RefreshReason::EditorSaved => {
-                                buffer.read(cx).is_dirty()
+                                // REPRO: when the buffer is also dirty, we then go to "skip"
+                                buffer.read(cx).is_dirty() // When this is true, we get the panic. All other cases, no.
                             }
                             RefreshReason::StatusesChanged => false,
                         };
@@ -819,11 +843,14 @@ impl ProjectDiff {
                     }
 
                     this.buffer_diff_subscriptions.remove(&path.path);
+                    // REPRO: This is skipped, by the buffer being dirty, leaving (FileStatus::conflict, "/test.txt") in `excerpts_by_path`
                     editor.remove_excerpts_for_path(path, cx);
                 }
             });
             buffers_to_load
         })?;
+        // REPRO: Assuming, at some point down here, we INSERT (FileStatus::tracked, "/test.txt"), into excerpts_by_path, THEN, 
+        // we have the panic that Eric found!!!!
 
         let mut buffers_to_fold = Vec::new();
 

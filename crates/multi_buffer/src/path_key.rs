@@ -489,6 +489,10 @@ impl MultiBuffer {
             for &excerpt_id in &excerpt_ids {
                 self.paths_by_excerpt.insert(excerpt_id, path.clone());
             }
+            // Just adding this assertion isn't enough, we're moving the panic up but not actually making it easier to use
+            // Core problem: Excerpts by path shouldn't have this sort key on it, because that's just unescessary here!!!!
+            // assert!(!self.excerpts_by_path.contains_ignoring_sort_order(path));
+            // assert that excerpts by path DOES NOT have an existing path with a different sort order
             self.excerpts_by_path.insert(path, excerpt_ids);
         }
 
