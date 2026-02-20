@@ -209,6 +209,12 @@
       "title": "Allow using Zeta through an arbitrary OpenAI-compatible self-hosted API",
       "file": "suggestions/PR-49554.md",
       "date": "2026-02-19T20:21:04Z"
+    },
+    {
+      "pr": 49710,
+      "title": "git_ui: Refine display of the \"Review Diff\" button",
+      "file": "suggestions/PR-49710.md",
+      "date": "2026-02-20T12:28:24Z"
     }
   ]
 }
