@@ -72,7 +72,7 @@ function parseTimestampFromFilename(filePath) {
   return `${year}-${month}-${day}T${hour}:${minute}:${second}.${milliseconds.toString().padStart(3, "0")}Z`;
 }
 
-function writeBuildTimingJson(filePath, durationMs, firstCrate, target, lockWaitMs, command) {
+function writeBuildTimingJson(filePath, durationMs, firstCrate, target, blockedMs, command) {
   const buildTimingsDir = path.join(getZedDataDir(), "build_timings");
 
   // Create directory if it doesn't exist
@@ -92,7 +92,7 @@ function writeBuildTimingJson(filePath, durationMs, firstCrate, target, lockWait
     duration_ms: durationMs,
     first_crate: firstCrate,
     target: target,
-    lock_wait_ms: lockWaitMs,
+    blocked_ms: blockedMs,
     command: command,
   };
 
@@ -130,8 +130,8 @@ function analyzeTimings(filePath, command) {
   const sortedByStart = [...unitData].sort((a, b) => a.start - b.start);
   const firstRebuilt = sortedByStart[0];
 
-  // The minimum start time indicates time spent waiting for the cargo lock
-  const lockWaitTime = firstRebuilt.start;
+  // The minimum start time indicates time spent blocked (e.g. waiting for cargo lock)
+  const blockedTime = firstRebuilt.start;
 
   // Find the last item being built (the one that was still building when the build finished)
   // This is the unit with the latest end time (which we already found)
@@ -140,7 +140,7 @@ function analyzeTimings(filePath, command) {
   console.log("=== Cargo Timing Analysis ===\n");
   console.log(`File: ${path.basename(filePath)}\n`);
   console.log(`Total build time: ${formatTime(maxEndTime)}`);
-  console.log(`Time waiting for cargo lock: ${formatTime(lockWaitTime)}`);
+  console.log(`Time blocked: ${formatTime(blockedTime)}`);
   console.log(`Total crates compiled: ${unitData.length}\n`);
   console.log(`First crate rebuilt: ${formatUnit(firstRebuilt)}`);
   console.log(`  Started at: ${formatTime(firstRebuilt.start)}`);
@@ -152,10 +152,10 @@ function analyzeTimings(filePath, command) {
 
   // Write JSON file for BuildTiming struct
   const durationMs = maxEndTime * 1000;
-  const lockWaitMs = lockWaitTime * 1000;
+  const blockedMs = blockedTime * 1000;
   const firstCrateName = firstRebuilt.name;
   const targetName = lastBuilding.name;
-  writeBuildTimingJson(filePath, durationMs, firstCrateName, targetName, lockWaitMs, command);
+  writeBuildTimingJson(filePath, durationMs, firstCrateName, targetName, blockedMs, command);
 }
 
 // Main execution

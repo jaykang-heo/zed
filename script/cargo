@@ -34,7 +34,6 @@ const CARGO_ALIASES = {
 function expandAlias(subcommand) {
   return CARGO_ALIASES[subcommand] || subcommand;
 }
-const LOCK_WAIT_REGEX = /Blocking waiting for file lock on (.+)/;
 
 function detectShell() {
   // Check for PowerShell first (works when running from pwsh)
