@@ -5347,8 +5347,8 @@ impl MultiBufferSnapshot {
             }
         }
 
+        let excerpt_start_position = ExcerptDimension(start);
         if self.diff_transforms.is_empty() {
-            let excerpt_start_position = ExcerptDimension(start);
             if let Some(excerpt) = item {
                 if excerpt.id != excerpt_id && excerpt_id != ExcerptId::max() {
                     return excerpt_start_position.0;
@@ -5382,13 +5382,13 @@ impl MultiBufferSnapshot {
                 .cursor::<Dimensions<ExcerptDimension<MBD>, OutputDimension<MBD>>>(());
             diff_transforms_cursor.next();
 
-            let excerpt_start_position = ExcerptDimension(start);
             if let Some(excerpt) = item {
                 if excerpt.id != excerpt_id && excerpt_id != ExcerptId::max() {
                     return self.resolve_summary_for_anchor(
                         &Anchor::min(),
                         excerpt_start_position,
                         &mut diff_transforms_cursor,
+                        None,
                     );
                 }
                 let excerpt_buffer_start = excerpt
@@ -5413,18 +5413,27 @@ impl MultiBufferSnapshot {
                 if diff_transforms_cursor.start().0 < position {
                     diff_transforms_cursor.seek_forward(&position, Bias::Left);
                 }
-                self.resolve_summary_for_anchor(&anchor, position, &mut diff_transforms_cursor)
+                self.resolve_summary_for_anchor(
+                    &anchor,
+                    position,
+                    &mut diff_transforms_cursor,
+                    Some(&excerpt.buffer),
+                )
             } else {
                 diff_transforms_cursor.seek_forward(&excerpt_start_position, Bias::Left);
                 self.resolve_summary_for_anchor(
                     &Anchor::max(),
                     excerpt_start_position,
                     &mut diff_transforms_cursor,
+                    None,
                 )
             }
         }
     }
 
+    /// Maps an anchor's excerpt-space position to its output-space position by
+    /// walking the diff transforms. The cursor is shared across consecutive
+    /// calls, so it may already be partway through the transform list.
     fn resolve_summary_for_anchor<MBD>(
         &self,
         anchor: &Anchor,
@@ -5433,24 +5442,29 @@ impl MultiBufferSnapshot {
             DiffTransform,
             Dimensions<ExcerptDimension<MBD>, OutputDimension<MBD>>,
         >,
+        excerpt_buffer: Option<&text::BufferSnapshot>,
     ) -> MBD
     where
         MBD: MultiBufferDimension + Ord + Sub + AddAssign<<MBD as Sub>::Output>,
     {
         loop {
             let transform_end_position = diff_transforms.end().0;
-            let at_transform_end =
-                transform_end_position == excerpt_position && diff_transforms.item().is_some();
+            let item = diff_transforms.item();
+            let at_transform_end = transform_end_position == excerpt_position && item.is_some();
+
+            // A right-biased anchor at a transform boundary belongs to the
+            // *next* transform, so advance past the current one.
             if at_transform_end && anchor.text_anchor.bias == Bias::Right {
                 diff_transforms.next();
                 continue;
             }
 
             let mut position = diff_transforms.start().1;
-            match diff_transforms.item() {
+            match item {
                 Some(DiffTransform::DeletedHunk {
                     buffer_id,
                     base_text_byte_range,
+                    hunk_info,
                     ..
                 }) => {
                     if let Some(diff_base_anchor) = &anchor.diff_base_anchor
@@ -5458,6 +5472,8 @@ impl MultiBufferSnapshot {
                             self.diffs.get(buffer_id).map(|diff| diff.base_text())
                         && diff_base_anchor.is_valid(&base_text)
                     {
+                        // The anchor carries a diff-base position — resolve it
+                        // to a location inside the deleted hunk.
                         let base_text_offset = diff_base_anchor.to_offset(base_text);
                         if base_text_offset >= base_text_byte_range.start
                             && base_text_offset <= base_text_byte_range.end
@@ -5468,12 +5484,35 @@ impl MultiBufferSnapshot {
                                 );
                             position.0.add_text_dim(&position_in_hunk);
                         } else if at_transform_end {
+                            // diff_base offset falls outside this hunk's range;
+                            // advance to see if the next transform is a better fit.
                             diff_transforms.next();
                             continue;
                         }
+                    } else if at_transform_end
+                        && let Some(buffer) = excerpt_buffer
+                        && anchor
+                            .text_anchor
+                            .cmp(&hunk_info.hunk_start_anchor, buffer)
+                            .is_gt()
+                    {
+                        // The anchor has no (valid) diff-base position, so it
+                        // belongs in the buffer content, not in the deleted
+                        // hunk. However, after an edit deletes the text between
+                        // the hunk boundary and this anchor, both resolve to
+                        // the same excerpt_position—landing us here on the
+                        // DeletedHunk left behind by the shared cursor. Use the
+                        // CRDT ordering to detect that the anchor is strictly
+                        // *past* the hunk boundary and skip to the following
+                        // BufferContent.
+                        diff_transforms.next();
+                        continue;
                     }
                 }
                 _ => {
+                    // On a BufferContent (or no transform). If the anchor
+                    // carries a diff_base_anchor it needs a DeletedHunk, so
+                    // advance to find one.
                     if at_transform_end && anchor.diff_base_anchor.is_some() {
                         diff_transforms.next();
                         continue;
@@ -5561,6 +5600,7 @@ impl MultiBufferSnapshot {
                         &Anchor::min(),
                         excerpt_start_position,
                         &mut diff_transforms_cursor,
+                        None,
                     );
                     summaries.extend(excerpt_anchors.map(|_| position));
                     continue;
@@ -5595,6 +5635,7 @@ impl MultiBufferSnapshot {
                         anchor,
                         position,
                         &mut diff_transforms_cursor,
+                        Some(&excerpt.buffer),
                     ));
                 }
             } else {
@@ -5603,6 +5644,7 @@ impl MultiBufferSnapshot {
                     &Anchor::max(),
                     excerpt_start_position,
                     &mut diff_transforms_cursor,
+                    None,
                 );
                 summaries.extend(excerpt_anchors.map(|_| position));
             }
