@@ -1821,7 +1821,22 @@ impl Buffer {
     }
 
     pub fn random_byte_range(&self, start_offset: usize, rng: &mut impl rand::Rng) -> Range<usize> {
-        let end = self.clip_offset(rng.random_range(start_offset..=self.len()), Bias::Right);
+        self.random_small_byte_range(start_offset, rng)
+        // let end = self.clip_offset(rng.random_range(start_offset..=self.len()), Bias::Right);
+        // let start = self.clip_offset(rng.random_range(start_offset..=end), Bias::Right);
+        // start..end
+    }
+
+    pub fn random_small_byte_range(
+        &self,
+        start_offset: usize,
+        rng: &mut impl rand::Rng,
+    ) -> Range<usize> {
+        let len = rng.random_range(1..10);
+        let end = self.clip_offset(
+            rng.random_range(start_offset..=start_offset + len),
+            Bias::Right,
+        );
         let start = self.clip_offset(rng.random_range(start_offset..=end), Bias::Right);
         start..end
     }

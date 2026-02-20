@@ -314,9 +314,9 @@ impl Companion {
         .next();
 
         let Some(excerpt) = excerpt else {
-            return dbg!(Point::zero()..our_snapshot.max_point());
+            return Point::zero()..our_snapshot.max_point();
         };
-        dbg!(&excerpt.patch);
+        // dbg!(&excerpt.patch);
         excerpt.patch.edit_for_old_position(point).new
     }
 

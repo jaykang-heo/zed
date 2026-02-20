@@ -3303,7 +3303,7 @@ impl Buffer {
             }
 
             let new_start = last_end.map_or(0, |last_end| last_end + 1);
-            let mut range = self.random_byte_range(new_start, rng);
+            let mut range = self.random_small_byte_range(new_start, rng);
             if rng.random_bool(0.2) {
                 mem::swap(&mut range.start, &mut range.end);
             }

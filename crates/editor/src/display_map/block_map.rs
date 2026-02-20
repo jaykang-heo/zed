@@ -800,8 +800,8 @@ impl BlockMap {
                         .to_point(WrapPoint::new(edit.new.start, 0), Bias::Left);
                     let companion_end = companion_new_snapshot
                         .to_point(WrapPoint::new(edit.new.end, 0), Bias::Left);
-                    dbg!(display_map_id == companion.rhs_display_map_id);
-                    dbg!(companion_start, companion_end);
+                    // dbg!(display_map_id == companion.rhs_display_map_id);
+                    // dbg!(companion_start, companion_end);
 
                     // other side multibuffer point -(using excerpt and buffer mappings)-> other side buffer point
                     // -(using diffs)-> this side buffer point -> this side multibuffer point
@@ -824,7 +824,7 @@ impl BlockMap {
                         )
                         .end;
 
-                    dbg!(my_start, my_end);
+                    // dbg!(my_start, my_end);
 
                     let mut my_start = wrap_snapshot.make_wrap_point(my_start, Bias::Left);
                     let mut my_end = wrap_snapshot.make_wrap_point(my_end, Bias::Left);
@@ -923,8 +923,8 @@ impl BlockMap {
             // If the edit starts within an isomorphic transform, preserve its prefix
             // If the edit lands within a replacement block, expand the edit to include the start of the replaced input range
             let Some(transform) = cursor.item() else {
-                dbg!(&self.transforms.borrow().iter().collect::<Vec<_>>());
-                dbg!(edit);
+                // dbg!(&self.transforms.borrow().iter().collect::<Vec<_>>());
+                // dbg!(edit);
                 panic!("no transform");
             };
             let transform_rows_before_edit = old_start - *cursor.start();
