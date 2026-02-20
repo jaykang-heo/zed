@@ -19,6 +19,11 @@ jobs:
           ref: main
           fetch-depth: 0
 
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
       - name: Sync upstream
         run: |
           git remote add upstream https://github.com/zed-industries/zed.git || true
