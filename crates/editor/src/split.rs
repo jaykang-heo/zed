@@ -2020,6 +2020,7 @@ impl LhsEditor {
             return None;
         };
 
+        // Query with excerpts_for_path
         let rhs_excerpt_ids: Vec<ExcerptId> =
             rhs_multibuffer.excerpts_for_path(&path_key).collect();
 
@@ -2064,6 +2065,7 @@ impl LhsEditor {
             })
             .collect();
 
+        // assert!(lhs_result.excerpt_ids.len() ?= new_ranges)
         let lhs_result = lhs_multibuffer.update_path_excerpts(
             path_key,
             diff.read(lhs_cx).base_text_buffer().clone(),
@@ -2071,6 +2073,10 @@ impl LhsEditor {
             new_ranges,
             lhs_cx,
         );
+
+        // lhs_result.excerpt_ids = update_path_excerpts(excerpts_for_buffer()))
+        //
+        // assert!(lhs_result.excerpt_ids.len() == rhs_excerpt_ids.len())
         if !lhs_result.excerpt_ids.is_empty()
             && lhs_multibuffer
                 .diff_for(remote_id)
@@ -2079,13 +2085,16 @@ impl LhsEditor {
             lhs_multibuffer.add_inverted_diff(diff, lhs_cx);
         }
 
+        // group excerpt ids by buffer
         let rhs_merge_groups: Vec<Vec<ExcerptId>> = {
             let mut groups = Vec::new();
             let mut current_group = Vec::new();
             let mut last_id = None;
-
             for (i, &lhs_id) in lhs_result.excerpt_ids.iter().enumerate() {
+                // what does this mean?
                 if last_id == Some(lhs_id) {
+                    // invariant violated: lhs_results.excerpt_ids.len() > rhs_excerpt_ids.len()
+                    //                                vvv THIS IS THE PANIC
                     current_group.push(rhs_excerpt_ids[i]);
                 } else {
                     if !current_group.is_empty() {
